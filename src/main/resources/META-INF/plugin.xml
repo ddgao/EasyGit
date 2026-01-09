@@ -114,9 +114,27 @@
 
             <action id="EasyGit.ProjectView.CreateTag"
                     class="com.github.easygit.actions.ProjectViewCreateTagAction"
-                    text="打 Tag"
-                    description="为当前仓库创建 Tag"
+                    text="打 Tag..."
+                    description="打开对话框创建 Tag"
                     icon="AllIcons.Vcs.CommitNode"/>
+
+            <action id="EasyGit.ProjectView.CreateNormalTag"
+                    class="com.github.easygit.actions.ProjectViewCreateNormalTagAction"
+                    text="快速打正常版本 Tag"
+                    description="快速创建正常版本 Tag（v1.0.0）"
+                    icon="AllIcons.Vcs.Tag"/>
+
+            <action id="EasyGit.ProjectView.CreatePatchTag"
+                    class="com.github.easygit.actions.ProjectViewCreatePatchTagAction"
+                    text="快速打临时需求 Tag"
+                    description="快速创建临时需求 Tag（v1.0.0-P01）"
+                    icon="AllIcons.Vcs.Tag"/>
+
+            <action id="EasyGit.ProjectView.CreateHotfixTag"
+                    class="com.github.easygit.actions.ProjectViewCreateHotfixTagAction"
+                    text="快速打 Hotfix Tag"
+                    description="快速创建 Hotfix Tag（v1.0.0-H01）"
+                    icon="AllIcons.Vcs.Tag"/>
         </group>
 
         <!-- ==================== 主菜单组 ==================== -->

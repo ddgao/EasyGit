@@ -562,6 +562,7 @@ class EasyGitSettings : PersistentStateComponent<EasyGitSettings.State> {
         var autoFetchBeforeMerge: Boolean = true,
         var autoPushAfterMerge: Boolean = false,
         var tagPrefix: String = "v",
+        var tagVersionPattern: String = "^(R_\\d+\\.\\d+\\.\\d+|v?\\d+\\.\\d+\\.\\d+).*$",
         var scanRootPath: String = "",
         var scanMaxDepth: Int = 3
     )
@@ -573,6 +574,7 @@ class EasyGitSettings : PersistentStateComponent<EasyGitSettings.State> {
     var mainBranchName: String
     var autoFetchBeforeMerge: Boolean
     var autoPushAfterMerge: Boolean
+    var tagVersionPattern: String  // Tag 版本号提取正则（使用第一个捕获组）
 
     // 辅助方法
     fun addRepositoryPath(path: String)
