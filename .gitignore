@@ -27,3 +27,6 @@ Thumbs.db
 
 # Local configuration
 local.properties
+
+# Local documentation (not for GitHub)
+docs/VERSION_CHANGELOG_GUIDE.md
