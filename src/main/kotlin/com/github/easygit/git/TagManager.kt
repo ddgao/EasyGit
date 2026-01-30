@@ -165,6 +165,65 @@ class TagManager(private val project: Project) {
         )
     }
 
+    fun createTagWithName(
+        repository: GitRepository,
+        tagName: String,
+        description: String = "",
+        autoPush: Boolean = false
+    ): TagResult {
+        val repoName = repository.root.name
+
+        // 1. 先 fetch 远端最新状态，确保 origin/xxx 引用是最新的
+        gitOps.fetch(repository)
+
+        // 2. 刷新 IntelliJ 的仓库状态缓存
+        repository.update()
+
+        val remoteBranch = "origin/${settings.tagBaseBranchName}"
+        val commitHash = gitOps.getRemoteBranchCommit(repository, remoteBranch)
+            ?: return TagResult(
+                repositoryName = repoName,
+                tagName = tagName,
+                success = false,
+                message = "获取远端分支 $remoteBranch 的 commit 失败"
+            )
+
+        val createResult = gitOps.createTagOnCommit(
+            repository,
+            tagName,
+            commitHash,
+            description.ifBlank { null }
+        )
+
+        if (!createResult.success()) {
+            return TagResult(
+                repositoryName = repoName,
+                tagName = tagName,
+                success = false,
+                message = "创建 Tag 失败: ${createResult.errorOutputAsJoinedString}"
+            )
+        }
+
+        if (autoPush) {
+            val pushResult = gitOps.pushTag(repository, tagName)
+            if (!pushResult.success()) {
+                return TagResult(
+                    repositoryName = repoName,
+                    tagName = tagName,
+                    success = false,
+                    message = "Tag 已创建，但推送失败: ${pushResult.errorOutputAsJoinedString}"
+                )
+            }
+        }
+
+        return TagResult(
+            repositoryName = repoName,
+            tagName = tagName,
+            success = true,
+            message = if (autoPush) "Tag 创建并推送成功 (基于 $remoteBranch)" else "Tag 创建成功 (基于 $remoteBranch)"
+        )
+    }
+
     /**
      * 批量创建 Tag
      */
@@ -237,6 +296,7 @@ class TagManager(private val project: Project) {
      * @return 计算出的下一个 Tag 名称
      */
     fun suggestNextTagName(repository: GitRepository, tagType: TagType): String {
+        gitOps.fetchTags(repository)
         val tags = gitOps.getAllTags(repository)
 
         return when (tagType) {
@@ -285,39 +345,23 @@ class TagManager(private val project: Project) {
 
     /**
      * 计算下一个带后缀的 Tag（P 或 H）
-     * 逻辑：
-     * 1. 找到最新的 Tag
-     * 2. 如果最新 Tag 带有相同后缀(-P 或 -H)：基础版本不变，序号 +1
-     * 3. 如果最新 Tag 不带该后缀：基于最新 Tag 的基础版本创建第一个后缀 Tag
-     * 例如：
-     *   - 最新 Tag 是 R_3.1.6-P02，类型是 Patch -> R_3.1.6-P03
-     *   - 最新 Tag 是 R_3.1.7-P01，类型是 Hotfix -> R_3.1.7-H01 (使用 P01 的基础版本 R_3.1.7)
-     *   - 最新 Tag 是 R_3.1.6，类型是 Patch -> R_3.1.6-P01
+     * 扫描所有 Tag 找到相同基础版本和后缀的最大序号，+1 生成新 Tag
      */
     private fun suggestNextSuffixTag(tags: List<String>, suffix: String): String {
         if (tags.isEmpty()) {
             return "v1.0.0$suffix${String.format("%02d", 1)}"
         }
 
-        // 获取最新的 Tag
         val latestTag = tags.first()
-
-        // 匹配带指定后缀的 Tag: R_x.x.x-Pxx 或 vx.x.x-Pxx
-        val suffixPattern = Regex("^(.+)${Regex.escape(suffix)}(\\d+)$")
-
-        // 检查最新 Tag 是否带有相同后缀
-        val match = suffixPattern.matchEntire(latestTag)
-        if (match != null) {
-            // 最新 Tag 带有相同后缀，序号 +1
-            val baseVersion = match.groupValues[1]
-            val sequence = match.groupValues[2].toInt()
-            return "$baseVersion$suffix${String.format("%02d", sequence + 1)}"
-        }
-
-        // 最新 Tag 不带该后缀，提取基础版本，创建第一个后缀 Tag
-        // 注意：如果最新 Tag 带有其他后缀（如 -P），需要使用该后缀的基础版本
         val baseVersion = extractBaseVersionForNewSuffix(latestTag)
-        return "$baseVersion$suffix${String.format("%02d", 1)}"
+
+        val suffixPattern = Regex("^${Regex.escape(baseVersion)}${Regex.escape(suffix)}(\\d+)$")
+
+        val maxSequence = tags
+            .mapNotNull { tag -> suffixPattern.matchEntire(tag)?.groupValues?.get(1)?.toIntOrNull() }
+            .maxOrNull() ?: 0
+
+        return "$baseVersion$suffix${String.format("%02d", maxSequence + 1)}"
     }
 
     /**
