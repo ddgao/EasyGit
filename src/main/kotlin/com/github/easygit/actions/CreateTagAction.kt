@@ -2,10 +2,8 @@ package com.github.easygit.actions
 
 import com.github.easygit.git.GitOperations
 import com.github.easygit.git.TagManager
-import com.github.easygit.model.BatchOperationResult
 import com.github.easygit.model.OperationHistory
 import com.github.easygit.model.OperationType
-import com.github.easygit.model.TagConfig
 import com.github.easygit.model.TagResult
 import com.github.easygit.service.HistoryService
 import com.github.easygit.service.NotificationService
@@ -84,8 +82,11 @@ class CreateTagAction : AnAction() {
         ProgressManager.getInstance().run(object : Task.Backgroundable(project, "创建 Tag", true) {
             override fun run(indicator: ProgressIndicator) {
                 val results = mutableListOf<TagResult>()
+                val tagManager = TagManager(project)
                 val gitOps = GitOperations(project)
                 val historyService = HistoryService.getInstance()
+                val settings = EasyGitSettings.getInstance()
+                val baseBranch = "origin/${settings.tagBaseBranchName}"
 
                 repositoryTags.forEachIndexed { index, repoTag ->
                     indicator.checkCanceled()
@@ -96,45 +97,32 @@ class CreateTagAction : AnAction() {
                     val tagName = repoTag.tagName
 
                     if (repo != null) {
-                        // 使用该仓库对应的 Tag 名称
-                        val createResult = gitOps.createTag(
-                            repo,
-                            tagName,
-                            description.ifBlank { null }
-                        )
-
-                        val result = if (!createResult.success()) {
-                            TagResult(
+                        indicator.text2 = "Fetch 远端分支..."
+                        val fetchResult = gitOps.fetch(repo)
+                        if (!fetchResult.success()) {
+                            results.add(TagResult(
                                 repositoryName = repoTag.repositoryInfo.name,
                                 tagName = tagName,
                                 success = false,
-                                message = "创建 Tag 失败: ${createResult.errorOutputAsJoinedString}"
-                            )
-                        } else if (autoPush) {
-                            val pushResult = gitOps.pushTag(repo, tagName)
-                            TagResult(
-                                repositoryName = repoTag.repositoryInfo.name,
-                                tagName = tagName,
-                                success = pushResult.success(),
-                                message = if (pushResult.success()) "Tag 创建并推送成功" else "Tag 已创建，但推送失败: ${pushResult.errorOutputAsJoinedString}"
-                            )
-                        } else {
-                            TagResult(
-                                repositoryName = repoTag.repositoryInfo.name,
-                                tagName = tagName,
-                                success = true,
-                                message = "Tag 创建成功"
-                            )
+                                message = "Fetch 失败: ${fetchResult.errorOutputAsJoinedString}"
+                            ))
+                            return@forEachIndexed
                         }
+
+                        val result = tagManager.createTagWithName(
+                            repo,
+                            tagName,
+                            description,
+                            autoPush
+                        )
 
                         results.add(result)
 
-                        // 记录历史
                         val history = OperationHistory(
                             operationType = OperationType.CREATE_TAG,
                             repositoryName = repoTag.repositoryInfo.name,
                             repositoryPath = repoTag.repositoryInfo.path,
-                            sourceBranch = repo.currentBranch?.name ?: "",
+                            sourceBranch = baseBranch,
                             tagName = result.tagName,
                             success = result.success,
                             message = result.message
@@ -156,7 +144,6 @@ class CreateTagAction : AnAction() {
                     }
                 }
 
-                // 显示结果
                 showResults(project, results)
             }
         })

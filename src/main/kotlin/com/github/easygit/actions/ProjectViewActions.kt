@@ -154,17 +154,6 @@ abstract class ProjectViewMergeAction(private val target: MergeTarget) : Project
                 return@getRepositoriesFromContextAsync
             }
 
-            val settings = EasyGitSettings.getInstance()
-            val targetBranch = when (target) {
-                MergeTarget.DEV -> settings.devBranchName
-                MergeTarget.TEST -> settings.testBranchName
-                MergeTarget.MAIN -> settings.mainBranchName
-            }
-
-            // 获取当前分支作为源分支
-            val currentBranches = repositories.mapNotNull { it.currentBranch?.name }.distinct()
-            val defaultBranch = currentBranches.firstOrNull() ?: ""
-
             // 使用 MergeDialog 显示完整的合并选项
             val repoInfoList = repositories.map { repo ->
                 com.github.easygit.service.RepositoryInfo(
@@ -253,17 +242,6 @@ class ProjectViewOneClickMergeAction : ProjectViewBaseAction() {
             val settings = EasyGitSettings.getInstance()
             val currentBranches = repositories.mapNotNull { it.currentBranch?.name }.distinct()
             val defaultBranch = currentBranches.firstOrNull() ?: ""
-
-            // 使用 MergeDialog 显示完整的合并选项（目标分支默认为 DEV，但会依次合并所有）
-            val repoInfoList = repositories.map { repo ->
-                com.github.easygit.service.RepositoryInfo(
-                    name = repo.root.name,
-                    path = repo.root.path,
-                    currentBranch = repo.currentBranch?.name ?: "unknown",
-                    repository = repo,
-                    selected = true
-                )
-            }
 
             // 确认对话框
             val sourceBranch = Messages.showInputDialog(
@@ -465,121 +443,4 @@ class ProjectViewCreateTagAction : ProjectViewBaseAction() {
     }
 }
 
-/**
- * 项目视图 - 快速打正常版本 Tag
- */
-class ProjectViewCreateNormalTagAction : ProjectViewQuickTagAction(TagType.NORMAL)
 
-/**
- * 项目视图 - 快速打临时需求 Tag
- */
-class ProjectViewCreatePatchTagAction : ProjectViewQuickTagAction(TagType.PATCH)
-
-/**
- * 项目视图 - 快速打 Hotfix Tag
- */
-class ProjectViewCreateHotfixTagAction : ProjectViewQuickTagAction(TagType.HOTFIX)
-
-/**
- * 快速打 Tag 的基类
- */
-abstract class ProjectViewQuickTagAction(private val tagType: TagType) : ProjectViewBaseAction() {
-
-    override fun actionPerformed(e: AnActionEvent) {
-        val project = e.project ?: return
-
-        // 异步获取仓库列表
-        getRepositoriesFromContextAsync(e) { repositories ->
-            if (repositories.isEmpty()) {
-                NotificationService.warning(project, "EasyGit", "未找到 Git 仓库")
-                return@getRepositoriesFromContextAsync
-            }
-
-            val tagManager = TagManager(project)
-
-            // 获取建议的版本号
-            val suggestedVersion = repositories.firstOrNull()?.let {
-                tagManager.suggestNextVersion(it)
-            } ?: "v1.0.0"
-
-            // 弹出输入框
-            val baseVersion = Messages.showInputDialog(
-                project,
-                "将为以下 ${repositories.size} 个仓库创建 ${tagType.displayName} Tag:\n" +
-                        repositories.joinToString("\n") { "  - ${it.root.name}" } +
-                        "\n\n请输入基础版本号:",
-                "创建 ${tagType.displayName} Tag",
-                Messages.getQuestionIcon(),
-                suggestedVersion,
-                object : InputValidator {
-                    override fun checkInput(inputString: String?): Boolean {
-                        if (inputString.isNullOrBlank()) return false
-                        val formatted = tagManager.formatVersion(inputString)
-                        return tagManager.isValidVersion(formatted)
-                    }
-                    override fun canClose(inputString: String?): Boolean = checkInput(inputString)
-                }
-            ) ?: return@getRepositoriesFromContextAsync
-
-            val formattedVersion = tagManager.formatVersion(baseVersion)
-            val settings = EasyGitSettings.getInstance()
-
-            // 执行创建 Tag
-            createQuickTags(project, repositories, formattedVersion, tagType, settings.autoPushAfterMerge)
-        }
-    }
-
-    private fun createQuickTags(
-        project: Project,
-        repositories: List<GitRepository>,
-        baseVersion: String,
-        tagType: TagType,
-        autoPush: Boolean
-    ) {
-        ProgressManager.getInstance().run(object : Task.Backgroundable(project, "创建 Tag", true) {
-            override fun run(indicator: ProgressIndicator) {
-                val tagManager = TagManager(project)
-                val historyService = HistoryService.getInstance()
-                val results = mutableListOf<com.github.easygit.model.TagResult>()
-
-                repositories.forEachIndexed { index, repo ->
-                    indicator.checkCanceled()
-                    indicator.fraction = index.toDouble() / repositories.size
-                    indicator.text = "正在处理: ${repo.root.name}"
-
-                    val config = TagConfig(baseVersion, tagType, "", autoPush)
-                    val result = tagManager.createTag(repo, config, autoPush)
-                    results.add(result)
-
-                    indicator.text2 = if (result.success) "已创建: ${result.tagName}" else "失败"
-
-                    // 记录历史
-                    historyService.addHistory(OperationHistory(
-                        operationType = OperationType.CREATE_TAG,
-                        repositoryName = repo.root.name,
-                        repositoryPath = repo.root.path,
-                        sourceBranch = repo.currentBranch?.name ?: "",
-                        tagName = result.tagName,
-                        success = result.success,
-                        message = result.message
-                    ))
-                }
-
-                // 显示结果
-                ApplicationManager.getApplication().invokeLater {
-                    val dialog = TagResultDialog(project, results)
-                    dialog.show()
-
-                    // 显示汇总通知
-                    val successResults = results.filter { it.success }
-                    if (successResults.isNotEmpty()) {
-                        NotificationService.showTagResult(
-                            project,
-                            successResults.map { it.repositoryName to it.tagName }
-                        )
-                    }
-                }
-            }
-        })
-    }
-}

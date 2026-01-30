@@ -163,7 +163,7 @@ class TagResultDialog(
         sb.appendLine("已创建的 Tag:\n")
         sb.appendLine("=" .repeat(40))
         results.filter { it.success }.forEach { result ->
-            sb.appendLine("${result.repositoryName}: ${result.tagName}")
+            sb.appendLine("${result.repositoryName} ${result.tagName}")
         }
 
         if (failCount > 0) {

@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(find:*)",
+      "Edit",
+      "Read(/Users/gaodongdong/.gradle/init.gradle)",
+      "Bash(cd:*)",
+      "Read(/Users/gaodongdong/.gradle/gradle.properties)",
+      "Bash(cat:*)",
+      "Bash(git:*)"
+    ]
+  },
+  "statusLine": {
+    "command": "npx -y ccstatusline@latest",
+    "padding": 0,
+    "type": "command"
+  }
+}

@@ -31,6 +31,7 @@ class EasyGitConfigurable : Configurable {
     private val devBranchField = JBTextField()
     private val testBranchField = JBTextField()
     private val mainBranchField = JBTextField()
+    private val tagBaseBranchField = JBTextField()
 
     // 自动化选项
     private val autoFetchCheckBox = JBCheckBox("合并前自动 Fetch 最新代码")
@@ -182,6 +183,24 @@ class EasyGitConfigurable : Configurable {
         gbc.weightx = 1.0
         branchPanel.add(mainBranchField, gbc)
 
+        gbc.gridx = 0
+        gbc.gridy = 3
+        gbc.fill = GridBagConstraints.NONE
+        gbc.weightx = 0.0
+        branchPanel.add(JBLabel("打 Tag 基准分支:"), gbc)
+        gbc.gridx = 1
+        gbc.fill = GridBagConstraints.HORIZONTAL
+        gbc.weightx = 1.0
+        tagBaseBranchField.toolTipText = "留空则使用生产环境分支"
+        branchPanel.add(tagBaseBranchField, gbc)
+
+        gbc.gridx = 0
+        gbc.gridy = 4
+        gbc.gridwidth = 2
+        val tagBaseBranchNote = JBLabel("<html><font color='gray'>提示：打 Tag 将基于远端分支 origin/{基准分支} 创建</font></html>")
+        branchPanel.add(tagBaseBranchNote, gbc)
+        gbc.gridwidth = 1
+
         // 主面板布局
         gbc.gridx = 0
         gbc.gridy = 0
@@ -298,6 +317,7 @@ class EasyGitConfigurable : Configurable {
                 devBranchField.text != settings.state.devBranchName ||
                 testBranchField.text != settings.state.testBranchName ||
                 mainBranchField.text != settings.state.mainBranchName ||
+                tagBaseBranchField.text != settings.state.tagBaseBranch ||
                 autoFetchCheckBox.isSelected != settings.state.autoFetchBeforeMerge ||
                 autoPushCheckBox.isSelected != settings.state.autoPushAfterMerge ||
                 scanRootPathField.text != settings.state.scanRootPath ||
@@ -313,6 +333,7 @@ class EasyGitConfigurable : Configurable {
         settings.state.devBranchName = devBranchField.text
         settings.state.testBranchName = testBranchField.text
         settings.state.mainBranchName = mainBranchField.text
+        settings.state.tagBaseBranch = tagBaseBranchField.text
 
         // 保存自动化选项
         settings.state.autoFetchBeforeMerge = autoFetchCheckBox.isSelected
@@ -332,6 +353,7 @@ class EasyGitConfigurable : Configurable {
         devBranchField.text = settings.state.devBranchName
         testBranchField.text = settings.state.testBranchName
         mainBranchField.text = settings.state.mainBranchName
+        tagBaseBranchField.text = settings.state.tagBaseBranch
 
         // 加载自动化选项
         autoFetchCheckBox.isSelected = settings.state.autoFetchBeforeMerge

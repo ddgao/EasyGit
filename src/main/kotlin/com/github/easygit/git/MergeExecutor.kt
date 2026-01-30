@@ -40,11 +40,13 @@ class MergeExecutor(private val project: Project) {
         switchBackAfterMerge: Boolean = true
     ): BatchOperationResult {
         val repoName = repository.root.name
-        // 记录当前分支，用于合并后切换回来
         val originalBranch = gitOps.getCurrentBranch(repository) ?: sourceBranch
 
+        val isTargetRemote = targetBranch.startsWith("origin/")
+        val localTargetBranch = if (isTargetRemote) targetBranch.removePrefix("origin/") else targetBranch
+        val remoteTargetBranch = if (isTargetRemote) targetBranch else "origin/$targetBranch"
+
         try {
-            // 1. 检查是否有未提交的更改
             if (gitOps.hasUncommittedChanges(repository)) {
                 return BatchOperationResult(
                     repositoryName = repoName,
@@ -54,7 +56,6 @@ class MergeExecutor(private val project: Project) {
                 )
             }
 
-            // 2. Fetch 最新代码
             if (fetchFirst) {
                 val fetchResult = gitOps.fetch(repository)
                 if (!fetchResult.success()) {
@@ -67,49 +68,50 @@ class MergeExecutor(private val project: Project) {
                 }
             }
 
-            // 3. 切换到目标分支
-            val checkoutResult = gitOps.checkout(repository, targetBranch)
-            if (!checkoutResult.success()) {
-                // 尝试从远程检出
-                val remoteCheckout = gitOps.checkout(repository, "origin/$targetBranch")
-                if (!remoteCheckout.success()) {
+            if (!gitOps.localBranchExists(repository, localTargetBranch)) {
+                val createResult = gitOps.checkoutFromRemote(repository, localTargetBranch, remoteTargetBranch)
+                if (!createResult.success()) {
                     return BatchOperationResult(
                         repositoryName = repoName,
                         repositoryPath = repository.root.path,
                         success = false,
-                        message = "切换到 $targetBranch 分支失败: ${checkoutResult.errorOutputAsJoinedString}"
+                        message = "从远端创建本地分支 $localTargetBranch 失败: ${createResult.errorOutputAsJoinedString}"
                     )
                 }
-            }
+            } else {
+                val checkoutResult = gitOps.checkout(repository, localTargetBranch)
+                if (!checkoutResult.success()) {
+                    return BatchOperationResult(
+                        repositoryName = repoName,
+                        repositoryPath = repository.root.path,
+                        success = false,
+                        message = "切换到 $localTargetBranch 分支失败: ${checkoutResult.errorOutputAsJoinedString}"
+                    )
+                }
 
-            // 4. 拉取目标分支最新代码
-            val pullResult = gitOps.pull(repository, targetBranch)
-            if (!pullResult.success() && !pullResult.errorOutputAsJoinedString.contains("Already up to date")) {
-                // Pull 失败但不是因为已经是最新的
-                if (!pullResult.errorOutputAsJoinedString.contains("There is no tracking information")) {
-                    // 切换回原分支
-                    if (switchBackAfterMerge) {
-                        gitOps.checkout(repository, originalBranch)
+                val pullResult = gitOps.pull(repository, localTargetBranch)
+                if (!pullResult.success() && !pullResult.errorOutputAsJoinedString.contains("Already up to date")) {
+                    if (!pullResult.errorOutputAsJoinedString.contains("There is no tracking information")) {
+                        if (switchBackAfterMerge) {
+                            gitOps.checkout(repository, originalBranch)
+                        }
+                        return BatchOperationResult(
+                            repositoryName = repoName,
+                            repositoryPath = repository.root.path,
+                            success = false,
+                            message = "拉取 $localTargetBranch 最新代码失败: ${pullResult.errorOutputAsJoinedString}"
+                        )
                     }
-                    return BatchOperationResult(
-                        repositoryName = repoName,
-                        repositoryPath = repository.root.path,
-                        success = false,
-                        message = "拉取 $targetBranch 最新代码失败: ${pullResult.errorOutputAsJoinedString}"
-                    )
                 }
             }
 
-            // 5. 执行合并
             val mergeResult = gitOps.mergeWithResult(repository, sourceBranch)
 
             when (mergeResult) {
                 is MergeResult.Success -> {
-                    // 6. 推送（如果需要）
                     if (autoPush) {
                         val pushResult = gitOps.push(repository)
                         if (!pushResult.success()) {
-                            // 切换回原分支
                             if (switchBackAfterMerge) {
                                 gitOps.checkout(repository, originalBranch)
                             }
@@ -122,10 +124,8 @@ class MergeExecutor(private val project: Project) {
                         }
                     }
 
-                    // 记录历史
-                    recordHistory(repository, sourceBranch, targetBranch, true, "合并成功")
+                    recordHistory(repository, sourceBranch, localTargetBranch, true, "合并成功")
 
-                    // 7. 切换回原分支
                     if (switchBackAfterMerge) {
                         val switchBackResult = gitOps.checkout(repository, originalBranch)
                         val switchBackMsg = if (switchBackResult.success()) {
@@ -150,23 +150,19 @@ class MergeExecutor(private val project: Project) {
                 }
 
                 is MergeResult.Conflict -> {
-                    // 记录历史
-                    recordHistory(repository, sourceBranch, targetBranch, false, "存在冲突")
+                    recordHistory(repository, sourceBranch, localTargetBranch, false, "存在冲突")
 
-                    // 冲突时不切换回原分支，让用户在目标分支解决冲突
                     return BatchOperationResult(
                         repositoryName = repoName,
                         repositoryPath = repository.root.path,
                         success = false,
-                        message = "合并冲突，请在 $targetBranch 分支手动解决:\n${mergeResult.conflictFiles.joinToString("\n")}"
+                        message = "合并冲突，请在 $localTargetBranch 分支手动解决:\n${mergeResult.conflictFiles.joinToString("\n")}"
                     )
                 }
 
                 is MergeResult.Error -> {
-                    // 记录历史
-                    recordHistory(repository, sourceBranch, targetBranch, false, mergeResult.message)
+                    recordHistory(repository, sourceBranch, localTargetBranch, false, mergeResult.message)
 
-                    // 切换回原分支
                     if (switchBackAfterMerge) {
                         gitOps.checkout(repository, originalBranch)
                     }
@@ -180,12 +176,10 @@ class MergeExecutor(private val project: Project) {
                 }
             }
         } catch (e: Exception) {
-            // 异常时尝试切换回原分支
             if (switchBackAfterMerge) {
                 try {
                     gitOps.checkout(repository, originalBranch)
                 } catch (_: Exception) {
-                    // 忽略切换失败
                 }
             }
             return BatchOperationResult(
@@ -207,7 +201,8 @@ class MergeExecutor(private val project: Project) {
         autoPush: Boolean = true,
         switchBackAfterMerge: Boolean = true
     ): BatchOperationResult {
-        return executeMerge(repository, sourceBranch, target.branchName, autoPush, switchBackAfterMerge = switchBackAfterMerge)
+        val remoteBranch = "origin/${target.branchName}"
+        return executeMerge(repository, sourceBranch, remoteBranch, autoPush, switchBackAfterMerge = switchBackAfterMerge)
     }
 
     /**
@@ -295,10 +290,11 @@ class MergeExecutor(private val project: Project) {
         success: Boolean,
         message: String
     ) {
-        val operationType = when (targetBranch) {
-            "dev" -> OperationType.MERGE_TO_DEV
-            "test" -> OperationType.MERGE_TO_TEST
-            "main" -> OperationType.MERGE_TO_MAIN
+        val branchName = targetBranch.removePrefix("origin/")
+        val operationType = when (branchName) {
+            settings.devBranchName -> OperationType.MERGE_TO_DEV
+            settings.testBranchName -> OperationType.MERGE_TO_TEST
+            settings.mainBranchName -> OperationType.MERGE_TO_MAIN
             else -> OperationType.MERGE_TO_DEV
         }
 

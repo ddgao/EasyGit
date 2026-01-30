@@ -143,7 +143,7 @@ class OneClickMergeAction : AnAction() {
     private fun showResults(
         project: Project,
         allResults: Map<String, List<BatchOperationResult>>,
-        sourceBranch: String,
+        @Suppress("UNUSED_PARAMETER") sourceBranch: String,
         targets: List<String>
     ) {
         ApplicationManager.getApplication().invokeLater {

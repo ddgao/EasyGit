@@ -29,8 +29,11 @@ class EasyGitSettings : PersistentStateComponent<EasyGitSettings.State> {
         var autoFetchBeforeMerge: Boolean = true,
         var autoPushAfterMerge: Boolean = false,
         // Tag 版本号提取正则（使用第一个捕获组作为基础版本号）
-        // 例如: "R_(\\d+\\.\\d+\\.\\d+).*" 从 R_3.1.6-H02 提取 R_3.1.6
-        var tagVersionPattern: String = "^(R_\\d+\\.\\d+\\.\\d+|v?\\d+\\.\\d+\\.\\d+).*$",
+        // 例如: "R_(\\\\d+\\\\.\\\\d+\\\\.\\\\d+).*" 从 R_3.1.6-H02 提取 R_3.1.6
+        var tagVersionPattern: String = "^(R_\\\\d+\\\\.\\\\d+\\\\.\\\\d+|v?\\\\d+\\\\.\\\\d+\\\\.\\\\d+).*$",
+
+        // 打 Tag 基准分支（留空则使用 mainBranchName）
+        var tagBaseBranch: String = "",
 
         // 扫描配置
         var scanRootPath: String = "",
@@ -88,6 +91,15 @@ class EasyGitSettings : PersistentStateComponent<EasyGitSettings.State> {
         set(value) {
             myState.autoPushAfterMerge = value
         }
+
+    var tagBaseBranch: String
+        get() = myState.tagBaseBranch
+        set(value) {
+            myState.tagBaseBranch = value
+        }
+
+    val tagBaseBranchName: String
+        get() = myState.tagBaseBranch.ifBlank { myState.mainBranchName }
 
     // ==================== 辅助方法 ====================
 

@@ -40,7 +40,6 @@ class MergeDialog(
     private val repositoryTable = JBTable(tableModel)
 
     // 分支数据
-    private val allLocalBranches = mutableListOf<String>()
     private val allRemoteBranches = mutableListOf<String>()
     private val currentBranches = mutableSetOf<String>()
 
@@ -68,11 +67,6 @@ class MergeDialog(
         init()
         initBranchData()
         setupBranchLists()
-
-        // 设置默认目标分支
-        if (defaultTarget != null) {
-            selectBranchInList(targetBranchList, defaultTarget.branchName)
-        }
     }
 
     override fun createCenterPanel(): JComponent {
@@ -198,37 +192,42 @@ class MergeDialog(
      * 初始化分支数据
      */
     private fun initBranchData() {
-        val localBranchSet = mutableSetOf<String>()
         val remoteBranchSet = mutableSetOf<String>()
 
         repositories.forEach { repoInfo ->
             repoInfo.repository?.let { repo ->
                 val gitOps = GitOperations(project)
-                localBranchSet.addAll(gitOps.getLocalBranches(repo))
                 remoteBranchSet.addAll(gitOps.getRemoteBranches(repo))
                 gitOps.getCurrentBranch(repo)?.let { currentBranches.add(it) }
             }
         }
 
-        allLocalBranches.addAll(localBranchSet.sorted())
         allRemoteBranches.addAll(remoteBranchSet.sorted())
     }
 
-    /**
-     * 设置分支列表
-     */
     private fun setupBranchLists() {
-        // 源分支列表：当前分支优先，然后本地分支，最后远端分支
         populateBranchList(sourceListModel, prioritizeCurrentBranches = true)
-
-        // 目标分支列表：配置的环境分支优先，然后本地分支，最后远端分支
         populateBranchList(targetListModel, prioritizeCurrentBranches = false)
 
-        // 默认选择
         if (currentBranches.isNotEmpty()) {
-            selectBranchInList(sourceBranchList, currentBranches.first())
+            val currentRemoteBranch = "origin/${currentBranches.first()}"
+            selectBranchInList(sourceBranchList, currentRemoteBranch)
         }
-        selectBranchInList(targetBranchList, settings.devBranchName)
+
+        val targetBranchName = when (defaultTarget) {
+            MergeTarget.DEV -> settings.devBranchName
+            MergeTarget.TEST -> settings.testBranchName
+            MergeTarget.MAIN -> settings.mainBranchName
+            null -> settings.devBranchName
+        }
+        
+        val fallbackBranches = listOf(
+            "origin/${settings.devBranchName}",
+            "origin/${settings.testBranchName}",
+            "origin/${settings.mainBranchName}"
+        ).filter { it != "origin/$targetBranchName" }
+        
+        selectBranchInList(targetBranchList, "origin/$targetBranchName", fallbackBranches)
     }
 
     /**
@@ -243,34 +242,27 @@ class MergeDialog(
 
         val filterLower = filter.lowercase()
 
-        // 确定优先显示的分支
         val priorityBranches = if (prioritizeCurrentBranches) {
-            currentBranches
+            currentBranches.map { "origin/$it" }.toSet()
         } else {
-            setOf(settings.devBranchName, settings.testBranchName, settings.mainBranchName)
+            setOf(
+                "origin/${settings.devBranchName}",
+                "origin/${settings.testBranchName}",
+                "origin/${settings.mainBranchName}"
+            )
         }
 
-        // 添加优先分支（本地）
-        priorityBranches
-            .filter { it in allLocalBranches && (filter.isEmpty() || it.lowercase().contains(filterLower)) }
-            .sorted()
-            .forEach { listModel.addElement(it) }
-
-        // 添加其他本地分支
-        allLocalBranches
-            .filter { it !in priorityBranches && (filter.isEmpty() || it.lowercase().contains(filterLower)) }
-            .forEach { listModel.addElement(it) }
-
-        // 添加分隔符（如果有远端分支）
         val filteredRemoteBranches = allRemoteBranches
             .filter { filter.isEmpty() || it.lowercase().contains(filterLower) }
 
-        if (filteredRemoteBranches.isNotEmpty() && listModel.size() > 0) {
-            listModel.addElement("── 远端分支 ──")
-        }
+        priorityBranches
+            .filter { it in allRemoteBranches && (filter.isEmpty() || it.lowercase().contains(filterLower)) }
+            .sorted()
+            .forEach { listModel.addElement(it) }
 
-        // 添加远端分支
-        filteredRemoteBranches.forEach { listModel.addElement(it) }
+        filteredRemoteBranches
+            .filter { it !in priorityBranches }
+            .forEach { listModel.addElement(it) }
     }
 
     /**
@@ -283,37 +275,63 @@ class MergeDialog(
 
     /**
      * 在列表中选择指定分支
+     * @param list 分支列表
+     * @param branchName 要选择的分支名
+     * @param fallbackBranches 如果主分支不存在，依次尝试的备选分支列表
+     * @return 是否成功选择了分支
      */
-    private fun selectBranchInList(list: JBList<String>, branchName: String) {
+    private fun selectBranchInList(
+        list: JBList<String>,
+        branchName: String,
+        fallbackBranches: List<String> = emptyList()
+    ): Boolean {
         val model = list.model
+        
+        // 首先尝试选择指定的分支
         for (i in 0 until model.size) {
             if (model.getElementAt(i) == branchName) {
                 list.selectedIndex = i
                 list.ensureIndexIsVisible(i)
-                break
+                return true
             }
         }
+        
+        // 如果主分支不存在，尝试备选分支
+        for (fallback in fallbackBranches) {
+            for (i in 0 until model.size) {
+                if (model.getElementAt(i) == fallback) {
+                    list.selectedIndex = i
+                    list.ensureIndexIsVisible(i)
+                    return true
+                }
+            }
+        }
+        
+        // 如果都没找到，选择列表中的第一项（如果有的话）
+        if (model.size > 0) {
+            list.selectedIndex = 0
+            list.ensureIndexIsVisible(0)
+            return true
+        }
+        
+        return false
     }
 
     override fun doValidate(): ValidationInfo? {
-        // 检查是否选择了仓库
         if (!tableModel.hasSelection()) {
             return ValidationInfo("请至少选择一个仓库", repositoryTable)
         }
 
-        // 检查源分支
         val source = sourceBranchList.selectedValue
-        if (source.isNullOrBlank() || source == "── 远端分支 ──") {
+        if (source.isNullOrBlank()) {
             return ValidationInfo("请选择源分支", sourceBranchList)
         }
 
-        // 检查目标分支
         val target = targetBranchList.selectedValue
-        if (target.isNullOrBlank() || target == "── 远端分支 ──") {
+        if (target.isNullOrBlank()) {
             return ValidationInfo("请选择目标分支", targetBranchList)
         }
 
-        // 检查源分支和目标分支不能相同
         if (source == target) {
             return ValidationInfo("源分支和目标分支不能相同", targetBranchList)
         }

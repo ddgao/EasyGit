@@ -1,5 +1,7 @@
 package com.github.easygit.git
 
+import com.github.easygit.model.BranchInfo
+import com.github.easygit.model.CommitInfo
 import com.github.easygit.model.MergeResult
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
@@ -8,6 +10,8 @@ import git4idea.commands.GitCommand
 import git4idea.commands.GitCommandResult
 import git4idea.commands.GitLineHandler
 import git4idea.repo.GitRepository
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 
 /**
  * Git 操作封装类
@@ -25,6 +29,15 @@ class GitOperations(private val project: Project) {
     fun fetch(repository: GitRepository): GitCommandResult {
         val handler = GitLineHandler(project, repository.root, GitCommand.FETCH)
         handler.addParameters("--all", "--prune")
+        return git.runCommand(handler)
+    }
+
+    /**
+     * Fetch 远程 Tags（同步删除远端已删除的 Tags）
+     */
+    fun fetchTags(repository: GitRepository): GitCommandResult {
+        val handler = GitLineHandler(project, repository.root, GitCommand.FETCH)
+        handler.addParameters("origin", "--tags", "--prune", "--prune-tags")
         return git.runCommand(handler)
     }
 
@@ -254,15 +267,45 @@ class GitOperations(private val project: Project) {
 
     /**
      * 检查是否有未提交的更改（已跟踪文件的修改或暂存）
-     * 忽略未跟踪的文件（以 ?? 开头），因为它们不影响分支切换和合并
+     * 忽略：未跟踪文件、被 .gitignore 忽略的文件、.gitignore 中列出的已跟踪文件
      */
     fun hasUncommittedChanges(repository: GitRepository): Boolean {
         val result = status(repository)
         if (!result.success()) return false
 
-        // 过滤掉未跟踪的文件（以 ?? 开头）和被忽略的文件（以 !! 开头）
-        return result.output.any { line ->
-            line.isNotBlank() && !line.startsWith("??") && !line.startsWith("!!")
+        val changedFiles = result.output
+            .filter { line -> line.isNotBlank() && !line.startsWith("??") && !line.startsWith("!!") }
+            .map { line -> line.substring(3).trim() }
+
+        if (changedFiles.isEmpty()) return false
+
+        val ignoredFiles = getIgnoredTrackedFiles(repository, changedFiles)
+        val realChanges = changedFiles.filter { it !in ignoredFiles }
+
+        return realChanges.isNotEmpty()
+    }
+
+    /**
+     * 检查哪些文件在 .gitignore 中（即使已被跟踪）
+     */
+    private fun getIgnoredTrackedFiles(repository: GitRepository, files: List<String>): Set<String> {
+        if (files.isEmpty()) return emptySet()
+
+        return try {
+            val command = mutableListOf("git", "check-ignore", "--no-index")
+            command.addAll(files)
+
+            val process = ProcessBuilder(command)
+                .directory(java.io.File(repository.root.path))
+                .redirectErrorStream(true)
+                .start()
+
+            val output = process.inputStream.bufferedReader().readLines()
+            process.waitFor()
+
+            output.filter { it.isNotBlank() }.toSet()
+        } catch (e: Exception) {
+            emptySet()
         }
     }
 
@@ -278,5 +321,193 @@ class GitOperations(private val project: Project) {
      */
     fun refreshRepository(repository: GitRepository) {
         repository.update()
+    }
+
+    // ==================== 分支清理操作 ====================
+
+    fun getRemoteBranchesWithDetails(
+        repository: GitRepository,
+        remoteName: String = "origin"
+    ): List<BranchInfo> {
+        com.intellij.openapi.diagnostic.Logger.getInstance(GitOperations::class.java)
+            .info("获取远程分支详情, remoteName=$remoteName")
+        
+        val result = runGitCommand(
+            repository,
+            GitCommand.BRANCH,
+            "-r", "--format=%(refname:short)|%(committerdate:iso-strict)|%(authorname)"
+        )
+        
+        com.intellij.openapi.diagnostic.Logger.getInstance(GitOperations::class.java)
+            .info("Git branch 命令结果: success=${result.success()}, output lines=${result.output.size}")
+        
+        if (!result.success()) return emptyList()
+
+        return result.output
+            .filter { it.isNotBlank() && !it.contains("HEAD") && it.startsWith("$remoteName/") }
+            .mapNotNull { line ->
+                val parts = line.split("|")
+                if (parts.size < 3) return@mapNotNull null
+
+                val fullName = parts[0].trim()
+                val branchName = fullName.removePrefix("$remoteName/")
+                val dateStr = parts[1].trim()
+                val author = parts[2].trim()
+
+                val lastCommitDate = try {
+                    LocalDateTime.parse(dateStr, DateTimeFormatter.ISO_OFFSET_DATE_TIME)
+                } catch (e: Exception) {
+                    LocalDateTime.now()
+                }
+
+                BranchInfo(
+                    name = branchName,
+                    remoteName = fullName,
+                    lastCommitDate = lastCommitDate,
+                    author = author
+                )
+            }
+    }
+
+    fun isBranchMergedTo(
+        repository: GitRepository,
+        branchName: String,
+        targetBranch: String,
+        remoteName: String = "origin"
+    ): Boolean {
+        val result = runGitCommand(
+            repository,
+            GitCommand.BRANCH,
+            "-r", "--merged", "$remoteName/$targetBranch"
+        )
+        if (!result.success()) return false
+
+        return result.output.any { line ->
+            line.trim() == "$remoteName/$branchName"
+        }
+    }
+
+    fun checkBranchMergedStatus(
+        repository: GitRepository,
+        branchName: String,
+        protectedBranches: List<String>,
+        remoteName: String = "origin"
+    ): Map<String, Boolean> {
+        return protectedBranches.associateWith { targetBranch ->
+            isBranchMergedTo(repository, branchName, targetBranch, remoteName)
+        }
+    }
+
+    fun getLastCommits(
+        repository: GitRepository,
+        branchName: String,
+        count: Int = 3,
+        remoteName: String = "origin"
+    ): List<CommitInfo> {
+        val result = runGitCommand(
+            repository,
+            GitCommand.LOG,
+            "$remoteName/$branchName",
+            "--format=%h|%s|%an|%ar",
+            "-n", count.toString()
+        )
+        if (!result.success()) return emptyList()
+
+        return result.output
+            .filter { it.isNotBlank() }
+            .mapNotNull { line ->
+                val parts = line.split("|", limit = 4)
+                if (parts.size < 4) return@mapNotNull null
+
+                CommitInfo(
+                    hash = parts[0].trim(),
+                    message = parts[1].trim(),
+                    author = parts[2].trim(),
+                    relativeDate = parts[3].trim()
+                )
+            }
+    }
+
+    fun deleteLocalBranch(repository: GitRepository, branchName: String, force: Boolean = true): GitCommandResult {
+        val handler = GitLineHandler(project, repository.root, GitCommand.BRANCH)
+        handler.addParameters(if (force) "-D" else "-d", branchName)
+        return git.runCommand(handler)
+    }
+
+    fun deleteRemoteBranch(repository: GitRepository, branchName: String, remoteName: String = "origin"): GitCommandResult {
+        val handler = GitLineHandler(project, repository.root, GitCommand.PUSH)
+        handler.addParameters(remoteName, "--delete", branchName)
+        return git.runCommand(handler)
+    }
+
+    fun localBranchExists(repository: GitRepository, branchName: String): Boolean {
+        return repository.branches.localBranches.any { it.name == branchName }
+    }
+
+    /**
+     * 基于远端分支创建或重置本地分支
+     * 如果本地分支存在，先删除再从远端创建
+     * 如果不存在，直接从远端分支创建
+     */
+    fun checkoutFromRemote(repository: GitRepository, localBranch: String, remoteBranch: String): GitCommandResult {
+        if (localBranchExists(repository, localBranch)) {
+            val currentBranch = getCurrentBranch(repository)
+            if (currentBranch == localBranch) {
+                val tempResult = checkout(repository, remoteBranch)
+                if (!tempResult.success()) {
+                    return tempResult
+                }
+            }
+            deleteLocalBranch(repository, localBranch, force = true)
+        }
+        return checkoutNewBranch(repository, localBranch, remoteBranch)
+    }
+
+    /**
+     * 获取远端分支的 commit hash
+     */
+    fun getRemoteBranchCommit(repository: GitRepository, remoteBranch: String): String? {
+        val handler = GitLineHandler(project, repository.root, GitCommand.REV_PARSE)
+        handler.addParameters(remoteBranch)
+        val result = git.runCommand(handler)
+        return if (result.success()) {
+            result.output.firstOrNull()?.trim()
+        } else {
+            null
+        }
+    }
+
+    /**
+     * 在指定 commit 上创建 Tag
+     */
+    fun createTagOnCommit(repository: GitRepository, tagName: String, commitHash: String, message: String? = null): GitCommandResult {
+        val handler = GitLineHandler(project, repository.root, GitCommand.TAG)
+        if (!message.isNullOrBlank()) {
+            handler.addParameters("-a", tagName, commitHash, "-m", message)
+        } else {
+            handler.addParameters(tagName, commitHash)
+        }
+        return git.runCommand(handler)
+    }
+
+    @Suppress("UNUSED_PARAMETER")
+    fun getAllAuthors(repository: GitRepository, remoteName: String = "origin"): List<String> {
+        val result = runGitCommand(
+            repository,
+            GitCommand.BRANCH,
+            "-r", "--format=%(authorname)"
+        )
+        if (!result.success()) return emptyList()
+
+        return result.output
+            .filter { it.isNotBlank() }
+            .distinct()
+            .sorted()
+    }
+
+    private fun runGitCommand(repository: GitRepository, command: GitCommand, vararg params: String): GitCommandResult {
+        val handler = GitLineHandler(project, repository.root, command)
+        params.forEach { handler.addParameters(it) }
+        return git.runCommand(handler)
     }
 }

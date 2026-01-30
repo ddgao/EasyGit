@@ -26,11 +26,12 @@
 │                         Git Layer                               │
 ├─────────────────────────────────────────────────────────────────┤
 │  GitOperations         │  MergeExecutor      │  TagManager      │
-│  - fetch/pull          │  - 合并流程控制      │  - Tag 序号计算  │
-│  - checkout            │  - 冲突检测          │  - Tag 创建      │
+│  - fetch/fetchTags     │  - 合并流程控制      │  - Tag 序号计算  │
+│  - checkout            │  - 远端分支处理      │  - 基于远端分支  │
+│  - checkoutFromRemote  │  - 冲突检测          │    创建 Tag     │
 │  - merge               │  - 历史记录          │                  │
 │  - push                │                      │                  │
-│  - tag                 │                      │                  │
+│  - createTagOnCommit   │                      │                  │
 └────────┬───────────────┴────────┬────────────┴────────┬─────────┘
          │                        │                     │
          ▼                        ▼                     ▼
@@ -46,404 +47,217 @@
 
 ---
 
+## 核心设计：基于远端分支
+
+### 合并操作
+
+**传统方式**：基于本地分支合并
+**EasyGit 方式**：基于远端分支合并
+
+```
+源分支选择：只显示远端分支（origin/feature-xxx）
+目标分支：使用远端分支（origin/dev, origin/test, origin/main）
+
+合并流程：
+1. fetch 获取最新远端分支
+2. 如果本地无目标分支，从远端创建：git checkout -b dev origin/dev
+3. 如果本地已有目标分支，切换并 pull 最新
+4. 执行合并
+5. push 到远端
+6. 切回原分支
+```
+
+### 打 Tag 操作
+
+**传统方式**：在当前分支上打 Tag
+**EasyGit 方式**：基于配置的远端分支 commit 创建 Tag
+
+```
+配置项：tagBaseBranch（默认 main）
+远端分支：origin/{tagBaseBranch}
+
+打 Tag 流程：
+1. 获取远端分支的最新 commit：git rev-parse origin/main
+2. 在该 commit 上创建 Tag：git tag -a v1.0.0 <commit-hash> -m "message"
+3. 推送 Tag：git push origin v1.0.0
+```
+
+**优势**：
+- 不受当前工作分支影响
+- 确保 Tag 打在正确的发布分支上
+- 无需切换分支
+
+---
+
 ## 模块详解
 
-### 1. Actions 模块
+### 1. Git 模块
 
-负责处理用户交互，是插件的入口点。
+#### GitOperations.kt - 新增方法
 
-#### 文件：`MergeActions.kt`
 ```kotlin
-// 基础合并 Action
-abstract class BaseMergeAction(private val target: MergeTarget) : AnAction()
+// 从远端分支创建本地分支
+fun checkoutFromRemote(repository, localBranch, remoteBranch): GitCommandResult
 
-// 具体实现
-class MergeToDevAction : BaseMergeAction(MergeTarget.DEV)
-class MergeToTestAction : BaseMergeAction(MergeTarget.TEST)
-class MergeToMainAction : BaseMergeAction(MergeTarget.MAIN)
+// 获取远端分支的最新 commit hash
+fun getRemoteBranchCommit(repository, remoteBranch): String?
+
+// 在指定 commit 上创建 Tag
+fun createTagOnCommit(repository, tagName, commitHash, message): GitCommandResult
+
+// Fetch 远端 Tags
+fun fetchTags(repository): GitCommandResult
 ```
 
-**流程**：
-1. 获取配置的仓库列表
-2. 显示 MergeDialog 让用户选择
-3. 调用 MergeExecutor 执行合并
-4. 显示 ResultDialog 展示结果
-
-#### 文件：`ProjectViewActions.kt`
-```kotlin
-// 项目视图右键菜单 Action 基类
-abstract class ProjectViewBaseAction : AnAction() {
-    // 从右键上下文获取 Git 仓库
-    protected fun getRepositoryFromContext(e: AnActionEvent): GitRepository?
-    protected fun getRepositoriesFromContext(e: AnActionEvent): List<GitRepository>
-}
-```
-
-**特点**：
-- 自动检测右键选中的目录是否为 Git 仓库
-- 支持多选批量操作
-- 菜单仅在 Git 仓库目录上显示
-
----
-
-### 2. Git 模块
-
-封装所有 Git 操作。
-
-#### 文件：`GitOperations.kt`
-
-底层 Git 命令封装：
+#### MergeExecutor.kt - 远端分支处理
 
 ```kotlin
-class GitOperations(private val project: Project) {
-    private val git: Git = Git.getInstance()
-
-    // Fetch/Pull
-    fun fetch(repository: GitRepository): GitCommandResult
-    fun pull(repository: GitRepository, remoteBranch: String): GitCommandResult
-
-    // 分支操作
-    fun checkout(repository: GitRepository, branchName: String): GitCommandResult
-    fun getCurrentBranch(repository: GitRepository): String?
-    fun branchExists(repository: GitRepository, branchName: String): Boolean
-
-    // 合并操作
-    fun merge(repository: GitRepository, branchToMerge: String): GitCommandResult
-    fun mergeWithResult(repository: GitRepository, branchToMerge: String): MergeResult
-    fun abortMerge(repository: GitRepository): GitCommandResult
-
-    // 推送操作
-    fun push(repository: GitRepository): GitCommandResult
-    fun pushToRemote(repository: GitRepository, remoteBranch: String): GitCommandResult
-
-    // Tag 操作
-    fun createTag(repository: GitRepository, tagName: String, message: String?): GitCommandResult
-    fun pushTag(repository: GitRepository, tagName: String): GitCommandResult
-    fun getAllTags(repository: GitRepository): List<String>
-
-    // 状态
-    fun hasUncommittedChanges(repository: GitRepository): Boolean
-}
-```
-
-#### 文件：`MergeExecutor.kt`
-
-合并流程控制：
-
-```kotlin
-class MergeExecutor(private val project: Project) {
-
-    fun executeMerge(
-        repository: GitRepository,
-        sourceBranch: String,
-        targetBranch: String,
-        autoPush: Boolean,
-        fetchFirst: Boolean
-    ): BatchOperationResult {
-        // 1. 检查未提交更改
-        // 2. Fetch 最新代码
-        // 3. 切换到目标分支
-        // 4. Pull 目标分支
-        // 5. 执行合并
-        // 6. Push（如果配置）
-        // 7. 记录历史
+fun executeMerge(...) {
+    // 检测目标分支是否为远端格式
+    val isTargetRemote = targetBranch.startsWith("origin/")
+    val localTargetBranch = if (isTargetRemote) 
+        targetBranch.removePrefix("origin/") 
+    else 
+        targetBranch
+    
+    // 本地分支不存在时从远端创建
+    if (!gitOps.localBranchExists(repository, localTargetBranch)) {
+        gitOps.checkoutFromRemote(repository, localTargetBranch, remoteTargetBranch)
     }
+    
+    // 继续合并流程...
+}
+```
 
-    fun oneClickMerge(
-        repository: GitRepository,
-        sourceBranch: String,
-        autoPush: Boolean
-    ): List<BatchOperationResult> {
-        // 依次合并到 dev → test → main
+#### TagManager.kt - 基于远端分支创建 Tag
+
+```kotlin
+fun createTagWithName(repository, tagName, description, autoPush): TagResult {
+    val remoteBranch = "origin/${settings.tagBaseBranchName}"
+    
+    // 获取远端分支的 commit
+    val commitHash = gitOps.getRemoteBranchCommit(repository, remoteBranch)
+        ?: return TagResult(error = "获取远端分支 commit 失败")
+    
+    // 在该 commit 上创建 Tag
+    gitOps.createTagOnCommit(repository, tagName, commitHash, description)
+    
+    if (autoPush) {
+        gitOps.pushTag(repository, tagName)
     }
 }
-```
-
-#### 文件：`TagManager.kt`
-
-Tag 智能管理：
-
-```kotlin
-class TagManager(private val project: Project) {
-
-    // 获取最新正常版本 Tag
-    fun getLatestVersionTag(repository: GitRepository): String?
-
-    // 计算下一个序号
-    fun getNextSequence(repository: GitRepository, baseVersion: String, tagType: TagType): Int {
-        // 解析现有 Tag，找出最大序号并 +1
-        // v1.0.0-P01, v1.0.0-P02 → 返回 3
-    }
-
-    // 生成下一个 Tag 名称
-    fun generateNextTagName(repository: GitRepository, baseVersion: String, tagType: TagType): String
-
-    // 创建 Tag
-    fun createTag(repository: GitRepository, tagConfig: TagConfig, autoPush: Boolean): TagResult
-
-    // 版本号验证和格式化
-    fun isValidVersion(version: String): Boolean
-    fun formatVersion(version: String): String  // 确保以 v 开头
-}
-```
-
-**Tag 序号计算逻辑**：
-```
-输入: baseVersion = "v1.0.0", tagType = PATCH
-现有 Tags: ["v1.0.0", "v1.0.0-P01", "v1.0.0-P02", "v1.0.0-H01"]
-匹配模式: v1.0.0-P(\d+)
-匹配结果: [01, 02]
-最大序号: 2
-返回: 3
-生成: v1.0.0-P03
 ```
 
 ---
 
-### 3. Model 模块
+### 2. Settings 模块
 
-数据模型定义。
+#### EasyGitSettings.kt - 新增配置
 
-#### 文件：`MergeConfig.kt`
 ```kotlin
-// 合并配置
-data class MergeConfig(
-    val sourceBranch: String,
-    val targetBranch: String,
-    val autoPush: Boolean = false,
-    val fetchBeforeMerge: Boolean = true
+data class State(
+    // 分支配置
+    var devBranchName: String = "dev",
+    var testBranchName: String = "test",
+    var mainBranchName: String = "main",
+    var tagBaseBranch: String = "main",  // 打 Tag 基准分支
+    
+    // 自动化选项
+    var autoFetchBeforeMerge: Boolean = true,
+    var autoPushAfterMerge: Boolean = false,
+    
+    // 仓库配置（可选，用于工具窗口）
+    var repositoryPaths: MutableList<String> = mutableListOf(),
+    
+    // Tag 版本号提取正则
+    var tagVersionPattern: String = "^(R_\\d+\\.\\d+\\.\\d+|v?\\d+\\.\\d+\\.\\d+).*$"
 )
 
-// 合并目标
-enum class MergeTarget(val branchName: String, val displayName: String) {
-    DEV("dev", "开发环境"),
-    TEST("test", "测试环境"),
-    MAIN("main", "生产环境")
-}
+// 便捷属性
+val tagBaseBranchName: String
+    get() = state.tagBaseBranch.ifBlank { "main" }
+```
 
-// 合并结果（密封类）
-sealed class MergeResult {
-    data class Success(val message: String) : MergeResult()
-    data class Conflict(val conflictFiles: List<String>) : MergeResult()
-    data class Error(val message: String) : MergeResult()
+---
+
+### 3. UI 模块
+
+#### MergeDialog.kt - 只显示远端分支
+
+```kotlin
+private fun loadBranches() {
+    // 只加载远端分支
+    val remoteBranches = gitOps.getRemoteBranches(repository)
+    sourceBranchCombo.removeAllItems()
+    remoteBranches.forEach { sourceBranchCombo.addItem(it) }
 }
 ```
 
-#### 文件：`TagConfig.kt`
+#### TagDialog.kt - 显示基准分支
+
 ```kotlin
-// Tag 类型
-enum class TagType(val prefix: String, val displayName: String) {
-    NORMAL("", "正常版本"),      // v1.0.0
-    PATCH("-P", "临时需求"),     // v1.0.0-P01
-    HOTFIX("-H", "Hotfix")       // v1.0.0-H01
-}
-
-// Tag 配置
-data class TagConfig(
-    val baseVersion: String,
-    val tagType: TagType,
-    val description: String = "",
-    val autoPush: Boolean = false
-) {
-    fun generateTagName(sequence: Int = 1): String
-}
-```
-
-#### 文件：`OperationHistory.kt`
-```kotlin
-// 操作类型
-enum class OperationType(val displayName: String) {
-    MERGE_TO_DEV("合并到 Dev"),
-    MERGE_TO_TEST("合并到 Test"),
-    MERGE_TO_MAIN("合并到 Main"),
-    ONE_CLICK_MERGE("一键合并"),
-    CREATE_TAG("打 Tag")
-}
-
-// 操作历史
-data class OperationHistory(
-    val id: Long,
-    val timestamp: LocalDateTime,
-    val operationType: OperationType,
-    val repositoryName: String,
-    val repositoryPath: String,
-    val sourceBranch: String,
-    val targetBranch: String,
-    val tagName: String,
-    val success: Boolean,
-    val message: String
+// 表格列
+private val columnNames = arrayOf(
+    "选择", 
+    "仓库名称", 
+    "基准分支",     // 显示 origin/main（从配置读取）
+    "最新 Tag", 
+    "新 Tag 名称", 
+    "操作"
 )
+
+// 基准分支值
+private val baseBranch = "origin/${settings.tagBaseBranchName}"
 ```
-
----
-
-### 4. Service 模块
-
-业务服务层。
-
-#### 文件：`RepositoryService.kt`
-```kotlin
-class RepositoryService(private val project: Project) {
-
-    // 获取项目仓库
-    fun getProjectRepositories(): List<GitRepository>
-
-    // 根据路径加载仓库
-    fun loadRepositories(paths: List<String>): List<GitRepository>
-
-    // 扫描目录发现仓库
-    fun scanRepositories(rootPath: String, maxDepth: Int = 3): List<VirtualFile>
-
-    // 验证是否为 Git 仓库
-    fun isValidGitRepository(path: String): Boolean
-}
-```
-
-#### 文件：`HistoryService.kt`
-```kotlin
-@Service
-class HistoryService : PersistentStateComponent<OperationHistoryState> {
-
-    fun addHistory(history: OperationHistory)
-    fun getAllHistories(): List<OperationHistory>
-    fun getRecentHistories(limit: Int): List<OperationHistory>
-    fun clearHistory()
-}
-```
-
-#### 文件：`NotificationService.kt`
-```kotlin
-object NotificationService {
-    fun info(project: Project?, title: String, content: String)
-    fun warning(project: Project?, title: String, content: String)
-    fun error(project: Project?, title: String, content: String)
-    fun showMergeResult(project: Project?, successCount: Int, failCount: Int)
-    fun showTagResult(project: Project?, tagResults: List<Pair<String, String>>)
-}
-```
-
----
-
-### 5. Settings 模块
-
-配置持久化。
-
-#### 文件：`EasyGitSettings.kt`
-```kotlin
-@State(name = "EasyGitSettings", storages = [Storage("EasyGitSettings.xml")])
-@Service
-class EasyGitSettings : PersistentStateComponent<EasyGitSettings.State> {
-
-    data class State(
-        var repositoryPaths: MutableList<String>,
-        var devBranchName: String = "dev",
-        var testBranchName: String = "test",
-        var mainBranchName: String = "main",
-        var autoFetchBeforeMerge: Boolean = true,
-        var autoPushAfterMerge: Boolean = false,
-        var tagPrefix: String = "v"
-    )
-}
-```
-
-存储位置：`~/.config/JetBrains/<IDE>/options/EasyGitSettings.xml`
-
----
-
-### 6. UI 模块
-
-用户界面组件。
-
-#### 文件：`EasyGitToolWindow.kt`
-工具窗口面板，包含：
-- 仓库列表表格（可勾选）
-- 工具栏按钮
-- 状态栏
-
-#### 文件：`MergeDialog.kt`
-合并配置对话框：
-- 仓库选择表格
-- 源分支/目标分支下拉框
-- 自动 Fetch/Push 选项
-
-#### 文件：`TagDialog.kt`
-Tag 创建对话框：
-- 仓库选择
-- 基础版本号输入
-- Tag 类型选择
-- 描述输入
-- 实时预览
-
-#### 文件：`ResultDialog.kt`
-结果展示对话框：
-- 统计信息
-- 详细结果表格
-- 复制功能
 
 ---
 
 ## 数据流
 
-### 合并操作流程
+### 合并操作流程（基于远端分支）
 
 ```
 用户右键 → ProjectViewMergeAction
     │
     ▼
-获取选中的 Git 仓库
+显示 MergeDialog（只显示远端分支）
     │
     ▼
-显示确认对话框（输入源分支）
-    │
-    ▼
-ProgressManager.run() 启动后台任务
+用户选择：origin/feature-xxx → origin/dev
     │
     ▼
 MergeExecutor.executeMerge()
-    ├── GitOperations.fetch()
-    ├── GitOperations.checkout()
-    ├── GitOperations.pull()
-    ├── GitOperations.merge()
-    │       │
-    │       ▼
-    │   检查合并结果
-    │   ├── Success → GitOperations.push() (可选)
-    │   └── Conflict → 返回冲突信息
-    │
-    ▼
-HistoryService.addHistory()
+    ├── GitOperations.fetch()           # 获取最新远端
+    ├── 检查本地是否有 dev 分支
+    │   ├── 有 → checkout dev + pull
+    │   └── 无 → checkoutFromRemote(dev, origin/dev)
+    ├── GitOperations.merge(feature-xxx)
+    ├── GitOperations.push()            # 推送到远端
+    └── checkout 回原分支
     │
     ▼
 显示 ResultDialog
-    │
-    ▼
-NotificationService.showMergeResult()
 ```
 
-### Tag 创建流程
+### Tag 创建流程（基于远端分支）
 
 ```
-用户右键 → ProjectViewCreatePatchTagAction
+用户右键 → ProjectViewCreateTagAction
     │
     ▼
-获取选中的 Git 仓库
+显示 TagDialog
+    ├── 加载最新 Tag（本地）
+    └── 计算建议的新 Tag 名称
     │
     ▼
-TagManager.suggestNextVersion() 获取建议版本
+用户确认 Tag 名称和描述
     │
     ▼
-显示输入对话框
-    │
-    ▼
-TagManager.getNextSequence() 计算序号
-    │
-    ▼
-TagManager.createTag()
-    ├── GitOperations.createTag()
-    └── GitOperations.pushTag() (可选)
-    │
-    ▼
-HistoryService.addHistory()
+TagManager.createTagWithName()
+    ├── 获取配置的基准分支：origin/main
+    ├── gitOps.getRemoteBranchCommit(origin/main)
+    ├── gitOps.createTagOnCommit(tagName, commitHash, message)
+    └── gitOps.pushTag(tagName)  # 如果开启自动推送
     │
     ▼
 显示 TagResultDialog
@@ -451,58 +265,27 @@ HistoryService.addHistory()
 
 ---
 
-## 扩展点
+## 配置说明
 
-### 添加新的合并目标
+### 分支配置
 
-1. **修改枚举**：`MergeTarget.kt`
+| 配置项 | 默认值 | 用途 |
+|--------|--------|------|
+| devBranchName | dev | 合并目标 DEV |
+| testBranchName | test | 合并目标 TEST |
+| mainBranchName | main | 合并目标 MAIN |
+| tagBaseBranch | main | Tag 创建的基准远端分支 |
+
+### 工具窗口仓库来源
+
 ```kotlin
-enum class MergeTarget {
-    DEV, TEST, MAIN,
-    UAT  // 新增
+fun refreshRepositories() {
+    if (settings.repositoryPaths.isNotEmpty()) {
+        // 使用配置的仓库路径
+        repoService.loadRepositories(settings.repositoryPaths)
+    } else {
+        // 自动使用 IDEA 检测到的项目仓库
+        repoService.getProjectRepositories()
+    }
 }
 ```
-
-2. **添加配置**：`EasyGitSettings.kt`
-```kotlin
-var uatBranchName: String = "uat"
-```
-
-3. **创建 Action**：`MergeActions.kt`
-```kotlin
-class MergeToUatAction : BaseMergeAction(MergeTarget.UAT)
-```
-
-4. **注册 Action**：`plugin.xml`
-```xml
-<action id="EasyGit.MergeToUat"
-        class="...MergeToUatAction"
-        text="合并到 UAT"/>
-```
-
-### 添加新的 Tag 类型
-
-1. **修改枚举**：`TagConfig.kt`
-```kotlin
-enum class TagType {
-    NORMAL, PATCH, HOTFIX,
-    RELEASE("-R", "Release")  // 新增
-}
-```
-
-2. **创建快捷 Action**：`ProjectViewActions.kt`
-```kotlin
-class ProjectViewCreateReleaseTagAction : ProjectViewQuickTagAction(TagType.RELEASE)
-```
-
----
-
-## 异常处理
-
-| 场景 | 处理方式 |
-|------|---------|
-| 未提交更改 | 提示用户先提交或暂存 |
-| 分支不存在 | 尝试从远程检出，失败则报错 |
-| 合并冲突 | 返回冲突文件列表，中断流程 |
-| Push 失败 | 返回部分成功状态 |
-| 网络异常 | 捕获并显示错误信息 |

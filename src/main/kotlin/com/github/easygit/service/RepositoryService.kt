@@ -3,6 +3,7 @@ package com.github.easygit.service
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.LocalFileSystem
+import com.intellij.openapi.vfs.VirtualFile
 import git4idea.repo.GitRepository
 import git4idea.repo.GitRepositoryManager
 import java.io.File
@@ -75,6 +76,12 @@ class RepositoryService(private val project: Project) {
                 )
             }
         }
+    }
+
+    fun getRepositoryForFile(file: VirtualFile): GitRepository? {
+        val repoManager = GitRepositoryManager.getInstance(project)
+        return repoManager.getRepositoryForFile(file)
+            ?: repoManager.getRepositoryForRoot(file)
     }
 
     companion object {
