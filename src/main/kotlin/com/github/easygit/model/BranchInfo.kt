@@ -91,6 +91,9 @@ data class BranchFilterConfig(
     val mergedOnly: Boolean = false,
     /** 只显示未合并的分支 */
     val unmergedOnly: Boolean = false,
+    val mergedToDev: Boolean = false,
+    val mergedToTest: Boolean = false,
+    val mergedToMain: Boolean = false,
     /** 按作者筛选 */
     val author: String? = null,
     /** 搜索关键词（分支名） */

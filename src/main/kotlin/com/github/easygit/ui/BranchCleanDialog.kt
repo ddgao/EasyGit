@@ -4,13 +4,18 @@ import com.github.easygit.model.BranchDeleteResult
 import com.github.easygit.model.BranchFilterConfig
 import com.github.easygit.model.BranchInfo
 import com.github.easygit.service.BranchCleanService
+import com.github.easygit.settings.EasyGitSettings
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.application.ModalityState
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.progress.ProgressIndicator
+import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.progress.Task
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.DialogWrapper
 import com.intellij.openapi.ui.Messages
+import com.intellij.util.concurrency.AppExecutorUtil
 import com.intellij.ui.SearchTextField
 import com.intellij.ui.components.JBCheckBox
 import com.intellij.ui.components.JBLabel
@@ -25,19 +30,26 @@ import java.awt.FlowLayout
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
 import java.awt.Insets
+import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import javax.swing.*
 import javax.swing.event.DocumentEvent
 import javax.swing.event.DocumentListener
 import javax.swing.table.AbstractTableModel
 import javax.swing.table.DefaultTableCellRenderer
+import javax.swing.table.TableRowSorter
 
 class BranchCleanDialog(
     private val project: Project,
     private val repository: GitRepository
 ) : DialogWrapper(project) {
 
+    private val log = Logger.getInstance(BranchCleanDialog::class.java)
     private val branchCleanService = BranchCleanService.getInstance(project)
+    private val settings = EasyGitSettings.getInstance()
     private var allBranches: List<BranchInfo> = emptyList()
     private var filteredBranches: List<BranchInfo> = emptyList()
 
@@ -48,10 +60,21 @@ class BranchCleanDialog(
     private val monthsSpinner = JSpinner(SpinnerNumberModel(0, 0, 24, 1))
     private val mergedOnlyCheckBox = JBCheckBox("仅已合并")
     private val unmergedOnlyCheckBox = JBCheckBox("仅未合并")
+    private val mergedToDevCheckBox = JBCheckBox("已合并到 ${settings.devBranchName}")
+    private val mergedToTestCheckBox = JBCheckBox("已合并到 ${settings.testBranchName}")
+    private val mergedToMainCheckBox = JBCheckBox("已合并到 ${settings.mainBranchName}")
     private val authorComboBox = JComboBox<String>()
 
     private val statusLabel = JBLabel("正在加载分支...")
     private val statsLabel = JBLabel("")
+
+    private val loadTimeoutSeconds = 45L
+    private val loadTokenSequence = AtomicLong(0)
+    private val activeLoadToken = AtomicLong(0)
+
+    private fun updateUI(action: () -> Unit) {
+        ApplicationManager.getApplication().invokeLater(action, ModalityState.any())
+    }
 
     init {
         title = "分支清理 - ${repository.root.name}"
@@ -123,6 +146,19 @@ class BranchCleanDialog(
         authorComboBox.addActionListener { applyFilters() }
         panel.add(authorComboBox, gbc)
 
+        gbc.gridy = 1
+        gbc.gridx = 0
+        mergedToDevCheckBox.addActionListener { applyFilters() }
+        panel.add(mergedToDevCheckBox, gbc)
+
+        gbc.gridx = 1
+        mergedToTestCheckBox.addActionListener { applyFilters() }
+        panel.add(mergedToTestCheckBox, gbc)
+
+        gbc.gridx = 2
+        mergedToMainCheckBox.addActionListener { applyFilters() }
+        panel.add(mergedToMainCheckBox, gbc)
+
         return panel
     }
 
@@ -142,7 +178,16 @@ class BranchCleanDialog(
         branchTable.columnModel.getColumn(4).preferredWidth = 100
         branchTable.columnModel.getColumn(5).preferredWidth = 150
 
+        branchTable.columnModel.getColumn(3).cellRenderer = LastCommitCellRenderer()
         branchTable.columnModel.getColumn(4).cellRenderer = MergedStatusCellRenderer()
+        branchTable.columnModel.getColumn(5).cellRenderer = DaysAgoCellRenderer()
+
+        branchTable.autoCreateRowSorter = true
+        val sorter = branchTable.rowSorter as TableRowSorter<*>
+        sorter.setSortable(0, false)
+        sorter.sortsOnUpdates = true
+        branchTable.tableHeader.reorderingAllowed = false
+        branchTable.tableHeader.toolTipText = "点击列头可切换升序/降序"
 
         val scrollPane = JBScrollPane(branchTable)
         panel.add(scrollPane, BorderLayout.CENTER)
@@ -187,30 +232,51 @@ class BranchCleanDialog(
     }
 
     private fun loadBranches() {
+        val loadToken = loadTokenSequence.incrementAndGet()
+        activeLoadToken.set(loadToken)
+
         statusLabel.text = "正在加载分支..."
         isOKActionEnabled = false
+
+        val timeoutFuture: ScheduledFuture<*> = AppExecutorUtil.getAppScheduledExecutorService().schedule({
+            updateUI {
+                if (!activeLoadToken.compareAndSet(loadToken, 0L)) {
+                    return@updateUI
+                }
+                statusLabel.text = "加载分支超时（${loadTimeoutSeconds}s），请检查 Git 认证/网络后点击刷新"
+                isOKActionEnabled = false
+            }
+        }, loadTimeoutSeconds, TimeUnit.SECONDS)
 
         ProgressManager.getInstance().run(object : Task.Backgroundable(project, "加载分支信息", true) {
             override fun run(indicator: ProgressIndicator) {
                 try {
                     indicator.isIndeterminate = false
                     indicator.fraction = 0.0
-                    indicator.text = "正在 Fetch 远程仓库..."
-                    
-                    indicator.fraction = 0.3
-                    indicator.text = "正在获取分支列表..."
-                    
-                    val branches = branchCleanService.loadBranches(repository, fetchFirst = true)
-                    
-                    indicator.fraction = 0.8
-                    indicator.text = "正在获取作者列表..."
-                    
-                    val authors = branchCleanService.getAllAuthors(repository)
-                    
-                    indicator.fraction = 1.0
+                    indicator.text = "正在获取远程分支列表..."
+
+                    updateUI {
+                        statusLabel.text = "正在获取远程分支列表..."
+                    }
+
+                    val branches = branchCleanService.loadBranches(
+                        repository = repository,
+                        fetchFirst = false,
+                        progressCheck = { indicator.checkCanceled() }
+                    )
+
+                    indicator.checkCanceled()
+                    indicator.fraction = 0.9
                     indicator.text = "加载完成"
 
-                    ApplicationManager.getApplication().invokeLater {
+                    val authors = branches.map { it.author }.distinct().sorted()
+
+                    updateUI {
+                        timeoutFuture.cancel(false)
+                        if (!activeLoadToken.compareAndSet(loadToken, 0L)) {
+                            return@updateUI
+                        }
+
                         allBranches = branches
                         updateAuthorComboBox(authors)
                         applyFilters()
@@ -221,18 +287,40 @@ class BranchCleanDialog(
                         }
                         isOKActionEnabled = true
                     }
-                } catch (e: Exception) {
-                    com.intellij.openapi.diagnostic.Logger.getInstance(BranchCleanDialog::class.java)
-                        .error("加载分支失败", e)
-                    ApplicationManager.getApplication().invokeLater {
-                        statusLabel.text = "加载失败: ${e.message}"
+                } catch (e: Throwable) {
+                    if (e is ProcessCanceledException) {
+                        updateUI {
+                            timeoutFuture.cancel(false)
+                            if (!activeLoadToken.compareAndSet(loadToken, 0L)) {
+                                return@updateUI
+                            }
+
+                            statusLabel.text = "已取消加载"
+                            isOKActionEnabled = false
+                        }
+                        return
+                    }
+                    log.error("加载分支失败", e)
+                    val errorMessage = e.message?.takeIf { it.isNotBlank() } ?: e::class.java.simpleName
+                    updateUI {
+                        timeoutFuture.cancel(false)
+                        if (!activeLoadToken.compareAndSet(loadToken, 0L)) {
+                            return@updateUI
+                        }
+
+                        statusLabel.text = "加载失败: $errorMessage"
                         isOKActionEnabled = false
                     }
                 }
             }
 
             override fun onCancel() {
-                ApplicationManager.getApplication().invokeLater {
+                updateUI {
+                    timeoutFuture.cancel(false)
+                    if (!activeLoadToken.compareAndSet(loadToken, 0L)) {
+                        return@updateUI
+                    }
+
                     statusLabel.text = "已取消加载"
                     isOKActionEnabled = false
                 }
@@ -257,6 +345,9 @@ class BranchCleanDialog(
             monthsOld = monthsOld,
             mergedOnly = mergedOnlyCheckBox.isSelected,
             unmergedOnly = unmergedOnlyCheckBox.isSelected,
+            mergedToDev = mergedToDevCheckBox.isSelected,
+            mergedToTest = mergedToTestCheckBox.isSelected,
+            mergedToMain = mergedToMainCheckBox.isSelected,
             author = author,
             searchKeyword = searchKeyword
         )
@@ -346,7 +437,7 @@ class BranchCleanDialog(
                 val branchNames = branches.map { it.name }
                 val results = branchCleanService.deleteBranches(repository, branchNames)
 
-                ApplicationManager.getApplication().invokeLater {
+                updateUI {
                     showDeleteResults(results)
                     loadBranches()
                 }
@@ -378,7 +469,7 @@ class BranchCleanDialog(
     }
 
     private inner class BranchTableModel : AbstractTableModel() {
-        private val columnNames = arrayOf("选择", "分支名称", "作者", "最后提交", "合并状态", "最近提交")
+        private val columnNames = arrayOf("选择", "分支名称", "作者", "最后提交", "合并状态", "距今天数")
         private var branches: List<BranchInfo> = emptyList()
         private var selected: BooleanArray = BooleanArray(0)
 
@@ -393,25 +484,29 @@ class BranchCleanDialog(
         override fun getColumnName(column: Int): String = columnNames[column]
 
         override fun getColumnClass(columnIndex: Int): Class<*> {
-            return if (columnIndex == 0) java.lang.Boolean::class.java else String::class.java
+            return when (columnIndex) {
+                0 -> java.lang.Boolean::class.java
+                3 -> LocalDateTime::class.java
+                5 -> java.lang.Long::class.java
+                else -> String::class.java
+            }
         }
 
         override fun isCellEditable(rowIndex: Int, columnIndex: Int): Boolean = columnIndex == 0
 
         override fun getValueAt(rowIndex: Int, columnIndex: Int): Any {
             val branch = branches[rowIndex]
-            val dateFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
 
             return when (columnIndex) {
                 0 -> selected[rowIndex]
                 1 -> branch.name
                 2 -> branch.author
-                3 -> "${branch.lastCommitDate.format(dateFormatter)} (${branch.getDaysAgo()}天前)"
+                3 -> branch.lastCommitDate
                 4 -> {
                     val mergedList = branch.getMergedBranches()
                     if (mergedList.isEmpty()) "未合并" else "已合并: ${mergedList.joinToString(", ")}"
                 }
-                5 -> branch.lastCommits.firstOrNull()?.let { "${it.hash} ${it.message}" } ?: ""
+                5 -> branch.getDaysAgo()
                 else -> ""
             }
         }
@@ -464,6 +559,45 @@ class BranchCleanDialog(
             }
 
             return component
+        }
+    }
+
+    private class LastCommitCellRenderer : DefaultTableCellRenderer() {
+        private val dateFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+
+        override fun getTableCellRendererComponent(
+            table: JTable?,
+            value: Any?,
+            isSelected: Boolean,
+            hasFocus: Boolean,
+            row: Int,
+            column: Int
+        ): Component {
+            super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column)
+
+            if (value is LocalDateTime) {
+                val daysAgo = java.time.Duration.between(value, LocalDateTime.now()).toDays()
+                text = "${value.format(dateFormatter)} (${daysAgo}天前)"
+            } else {
+                text = value?.toString() ?: ""
+            }
+
+            return this
+        }
+    }
+
+    private class DaysAgoCellRenderer : DefaultTableCellRenderer() {
+        override fun getTableCellRendererComponent(
+            table: JTable?,
+            value: Any?,
+            isSelected: Boolean,
+            hasFocus: Boolean,
+            row: Int,
+            column: Int
+        ): Component {
+            super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column)
+            text = if (value is Number) "${value.toLong()} 天" else (value?.toString() ?: "")
+            return this
         }
     }
 }

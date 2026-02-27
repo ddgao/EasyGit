@@ -10,8 +10,12 @@ import git4idea.commands.GitCommand
 import git4idea.commands.GitCommandResult
 import git4idea.commands.GitLineHandler
 import git4idea.repo.GitRepository
+import com.intellij.util.concurrency.AppExecutorUtil
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 /**
  * Git 操作封装类
@@ -30,6 +34,22 @@ class GitOperations(private val project: Project) {
         val handler = GitLineHandler(project, repository.root, GitCommand.FETCH)
         handler.addParameters("--all", "--prune")
         return git.runCommand(handler)
+    }
+
+    /**
+     * 带超时的 fetch 远程仓库。
+     *
+     * @param repository Git 仓库
+     * @param timeoutSeconds 超时时间（秒）
+     * @return git 命令执行结果，超时会返回失败结果
+     */
+    fun fetchWithTimeout(repository: GitRepository, timeoutSeconds: Long): GitCommandResult {
+        return runGitCommandWithTimeout(
+            repository = repository,
+            command = GitCommand.FETCH,
+            timeoutSeconds = timeoutSeconds,
+            params = arrayOf("--all", "--prune")
+        )
     }
 
     /**
@@ -327,21 +347,28 @@ class GitOperations(private val project: Project) {
 
     fun getRemoteBranchesWithDetails(
         repository: GitRepository,
-        remoteName: String = "origin"
+        remoteName: String = "origin",
+        timeoutSeconds: Long = 30
     ): List<BranchInfo> {
         com.intellij.openapi.diagnostic.Logger.getInstance(GitOperations::class.java)
             .info("获取远程分支详情, remoteName=$remoteName")
-        
-        val result = runGitCommand(
+
+        val result = runGitCommandWithTimeout(
             repository,
             GitCommand.BRANCH,
-            "-r", "--format=%(refname:short)|%(committerdate:iso-strict)|%(authorname)"
+            timeoutSeconds,
+            arrayOf("-r", "--format=%(refname:short)|%(committerdate:iso-strict)|%(authorname)")
         )
         
         com.intellij.openapi.diagnostic.Logger.getInstance(GitOperations::class.java)
             .info("Git branch 命令结果: success=${result.success()}, output lines=${result.output.size}")
         
-        if (!result.success()) return emptyList()
+        if (!result.success()) {
+            val errorMessage = result.errorOutputAsJoinedString
+                .ifBlank { result.outputAsJoinedString }
+                .ifBlank { "未知错误" }
+            throw IllegalStateException("获取远程分支失败: $errorMessage")
+        }
 
         return result.output
             .filter { it.isNotBlank() && !it.contains("HEAD") && it.startsWith("$remoteName/") }
@@ -395,6 +422,62 @@ class GitOperations(private val project: Project) {
     ): Map<String, Boolean> {
         return protectedBranches.associateWith { targetBranch ->
             isBranchMergedTo(repository, branchName, targetBranch, remoteName)
+        }
+    }
+
+    /**
+     * 批量获取已合并到目标分支的所有远程分支名（不含 origin/ 前缀）
+     *
+     * @param repository Git 仓库
+     * @param targetBranch 目标分支名（不含 origin/ 前缀，如 "main"）
+     * @param remoteName 远程名称
+     * @return 已合并的远程分支名集合
+     */
+    fun getBranchesMergedTo(
+        repository: GitRepository,
+        targetBranch: String,
+        remoteName: String = "origin",
+        timeoutSeconds: Long = 15
+    ): Set<String> {
+        val result = runGitCommandWithTimeout(
+            repository,
+            GitCommand.BRANCH,
+            timeoutSeconds,
+            arrayOf("-r", "--merged", "$remoteName/$targetBranch")
+        )
+        if (!result.success()) return emptySet()
+
+        return result.output
+            .map { it.trim() }
+            .filter { it.isNotBlank() && !it.contains("HEAD") && it.startsWith("$remoteName/") }
+            .map { it.removePrefix("$remoteName/") }
+            .toSet()
+    }
+
+    /**
+     * 批量检查所有远程分支对各保护分支的合并状态
+     * 只执行 protectedBranches.size 次 git 命令，而非 branches × protectedBranches 次
+     *
+     * @param repository Git 仓库
+     * @param protectedBranches 保护分支列表
+     * @param remoteName 远程名称
+     * @return Map<分支名, Map<保护分支名, 是否已合并>>
+     */
+    fun batchCheckMergedStatus(
+        repository: GitRepository,
+        protectedBranches: List<String>,
+        remoteName: String = "origin",
+        timeoutSecondsPerTarget: Long = 15
+    ): Map<String, Map<String, Boolean>> {
+        val mergedSets = protectedBranches.associateWith { target ->
+            getBranchesMergedTo(repository, target, remoteName, timeoutSecondsPerTarget)
+        }
+
+        val allBranches = mergedSets.values.flatten().toSet()
+        return allBranches.associateWith { branch ->
+            protectedBranches.associateWith { target ->
+                mergedSets[target]?.contains(branch) == true
+            }
         }
     }
 
@@ -509,5 +592,38 @@ class GitOperations(private val project: Project) {
         val handler = GitLineHandler(project, repository.root, command)
         params.forEach { handler.addParameters(it) }
         return git.runCommand(handler)
+    }
+
+    private fun runGitCommandWithTimeout(
+        repository: GitRepository,
+        command: GitCommand,
+        timeoutSeconds: Long,
+        params: Array<String>
+    ): GitCommandResult {
+        if (timeoutSeconds <= 0) {
+            return runGitCommand(repository, command, *params)
+        }
+
+        val future = AppExecutorUtil.getAppExecutorService().submit<GitCommandResult> {
+            runGitCommand(repository, command, *params)
+        }
+
+        return try {
+            future.get(timeoutSeconds, TimeUnit.SECONDS)
+        } catch (_: TimeoutException) {
+            future.cancel(true)
+            GitCommandResult(
+                false,
+                -1,
+                emptyList(),
+                listOf("Git 命令执行超时（${timeoutSeconds}s）: ${command.name()} ${params.joinToString(" ")}")
+            )
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            GitCommandResult(false, -1, emptyList(), listOf("Git 命令执行被中断: ${e.message ?: "unknown"}"))
+        } catch (e: ExecutionException) {
+            val causeMessage = e.cause?.message ?: e.message ?: "unknown"
+            GitCommandResult(false, -1, emptyList(), listOf("Git 命令执行失败: $causeMessage"))
+        }
     }
 }

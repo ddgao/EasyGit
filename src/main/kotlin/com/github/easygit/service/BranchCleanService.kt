@@ -29,51 +29,55 @@ class BranchCleanService(private val project: Project) {
     fun loadBranches(
         repository: GitRepository,
         fetchFirst: Boolean = true,
-        lastCommitCount: Int = 3
+        progressCheck: (() -> Unit)? = null
     ): List<BranchInfo> {
-        com.intellij.openapi.diagnostic.Logger.getInstance(BranchCleanService::class.java)
-            .info("开始加载分支, fetchFirst=$fetchFirst")
-        
+        val log = com.intellij.openapi.diagnostic.Logger.getInstance(BranchCleanService::class.java)
+        log.info("开始加载分支, fetchFirst=$fetchFirst")
+
+        progressCheck?.invoke()
+
         if (fetchFirst) {
             try {
-                gitOperations.fetch(repository)
+                val fetchResult = gitOperations.fetchWithTimeout(repository, timeoutSeconds = FETCH_TIMEOUT_SECONDS)
+                if (!fetchResult.success()) {
+                    log.warn("Fetch 失败: ${fetchResult.errorOutputAsJoinedString}")
+                }
             } catch (e: Exception) {
-                com.intellij.openapi.diagnostic.Logger.getInstance(BranchCleanService::class.java)
-                    .warn("Fetch 失败: ${e.message}")
+                log.warn("Fetch 失败: ${e.message}")
             }
         }
 
-        val protectedBranches = getProtectedBranches()
-        val branches = gitOperations.getRemoteBranchesWithDetails(repository)
-        
-        com.intellij.openapi.diagnostic.Logger.getInstance(BranchCleanService::class.java)
-            .info("获取到 ${branches.size} 个远程分支")
+        progressCheck?.invoke()
 
-        // 为了提高性能，只在分支数量较少时获取详细信息
-        if (branches.size > 50) {
-            // 分支太多，只返回基本信息
-            return branches.map { branch ->
-                val isProtected = protectedBranches.contains(branch.name)
-                branch.copy(isProtected = isProtected)
-            }
+        val protectedBranches = getProtectedBranches()
+        val branches = gitOperations.getRemoteBranchesWithDetails(
+            repository = repository,
+            timeoutSeconds = LIST_BRANCH_TIMEOUT_SECONDS
+        )
+        log.info("获取到 ${branches.size} 个远程分支")
+
+        progressCheck?.invoke()
+
+        val mergedStatusMap = try {
+            gitOperations.batchCheckMergedStatus(
+                repository = repository,
+                protectedBranches = protectedBranches,
+                timeoutSecondsPerTarget = MERGED_CHECK_TIMEOUT_SECONDS
+            )
+        } catch (e: Exception) {
+            log.warn("批量检查合并状态失败: ${e.message}")
+            emptyMap()
         }
 
         return branches.map { branch ->
-            val mergedTo = try {
-                gitOperations.checkBranchMergedStatus(repository, branch.name, protectedBranches)
-            } catch (e: Exception) {
-                emptyMap()
-            }
-            val lastCommits = try {
-                gitOperations.getLastCommits(repository, branch.name, lastCommitCount)
-            } catch (e: Exception) {
-                emptyList()
-            }
+            progressCheck?.invoke()
+
+            val mergedTo = mergedStatusMap[branch.name]
+                ?: protectedBranches.associateWith { false }
             val isProtected = protectedBranches.contains(branch.name)
 
             branch.copy(
                 mergedTo = mergedTo,
-                lastCommits = lastCommits,
                 isProtected = isProtected
             )
         }
@@ -98,6 +102,10 @@ class BranchCleanService(private val project: Project) {
 
             if (config.mergedOnly && !branch.isMergedToAny()) return@filter false
             if (config.unmergedOnly && branch.isMergedToAny()) return@filter false
+
+            if (config.mergedToDev && branch.mergedTo[settings.devBranchName] != true) return@filter false
+            if (config.mergedToTest && branch.mergedTo[settings.testBranchName] != true) return@filter false
+            if (config.mergedToMain && branch.mergedTo[settings.mainBranchName] != true) return@filter false
 
             config.author?.let { author ->
                 if (!branch.author.contains(author, ignoreCase = true)) return@filter false
@@ -193,6 +201,10 @@ class BranchCleanService(private val project: Project) {
     }
 
     companion object {
+        private const val FETCH_TIMEOUT_SECONDS = 30L
+        private const val LIST_BRANCH_TIMEOUT_SECONDS = 30L
+        private const val MERGED_CHECK_TIMEOUT_SECONDS = 15L
+
         fun getInstance(project: Project): BranchCleanService {
             return project.getService(BranchCleanService::class.java)
         }
