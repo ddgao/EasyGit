@@ -37,7 +37,11 @@ class EasyGitSettings : PersistentStateComponent<EasyGitSettings.State> {
 
         // 扫描配置
         var scanRootPath: String = "",
-        var scanMaxDepth: Int = 3
+        var scanMaxDepth: Int = 3,
+
+        // 合并忽略文件列表（相对于仓库根目录的路径）
+        @Deprecated("已废弃：现在合并前会自动 stash 所有未提交变更，无需忽略列表")
+        var mergeIgnoreFiles: MutableList<String> = mutableListOf()
     )
 
     private var myState = State()
@@ -101,7 +105,7 @@ class EasyGitSettings : PersistentStateComponent<EasyGitSettings.State> {
     val tagBaseBranchName: String
         get() = myState.tagBaseBranch.ifBlank { myState.mainBranchName }
 
-    // ==================== 辅助方法 ====================
+    // ==================== 仓库路径管理 ====================
 
     /**
      * 添加仓库路径

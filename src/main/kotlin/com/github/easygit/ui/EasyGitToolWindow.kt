@@ -406,63 +406,56 @@ class EasyGitToolWindowPanel(private val project: Project) : JPanel(BorderLayout
 
         val dialog = TagDialog(project, selectedRepos)
         if (dialog.showAndGet()) {
-            createTagsWithName(
-                dialog.getSelectedRepositories(),
-                dialog.getTagName(),
+            createTagsWithIndividualNames(
+                dialog.getSelectedRepositoryTags(),
                 dialog.getDescription(),
                 dialog.isAutoPush()
             )
         }
     }
 
-    private fun createTagsWithName(
-        repos: List<RepositoryInfo>,
-        tagName: String,
+    private fun createTagsWithIndividualNames(
+        repositoryTags: List<RepositoryTagInfo>,
         description: String,
         autoPush: Boolean
     ) {
         ProgressManager.getInstance().run(object : Task.Backgroundable(project, "创建 Tag", true) {
             override fun run(indicator: ProgressIndicator) {
-                val gitOps = GitOperations(project)
+                val tagManager = TagManager(project)
+                val historyService = HistoryService.getInstance()
                 val results = mutableListOf<com.github.easygit.model.TagResult>()
 
-                repos.forEachIndexed { index, repoInfo ->
+                repositoryTags.forEachIndexed { index, repoTag ->
                     indicator.checkCanceled()
-                    indicator.fraction = index.toDouble() / repos.size
-                    indicator.text = "正在处理: ${repoInfo.name}"
+                    indicator.fraction = index.toDouble() / repositoryTags.size
+                    indicator.text = "正在处理: ${repoTag.repositoryInfo.name}"
 
-                    val repo = repoInfo.repository
+                    val repo = repoTag.repositoryInfo.repository
                     if (repo != null) {
-                        // 直接使用用户指定的 Tag 名称
-                        val createResult = gitOps.createTag(
+                        val result = tagManager.createTagWithName(
                             repo,
-                            tagName,
-                            description.ifBlank { null }
+                            repoTag.tagName,
+                            description,
+                            autoPush
                         )
+                        results.add(result)
 
-                        if (!createResult.success()) {
-                            results.add(com.github.easygit.model.TagResult(
-                                repositoryName = repoInfo.name,
-                                tagName = tagName,
-                                success = false,
-                                message = "创建 Tag 失败: ${createResult.errorOutputAsJoinedString}"
-                            ))
-                        } else if (autoPush) {
-                            val pushResult = gitOps.pushTag(repo, tagName)
-                            results.add(com.github.easygit.model.TagResult(
-                                repositoryName = repoInfo.name,
-                                tagName = tagName,
-                                success = pushResult.success(),
-                                message = if (pushResult.success()) "Tag 创建并推送成功" else "Tag 已创建，但推送失败: ${pushResult.errorOutputAsJoinedString}"
-                            ))
-                        } else {
-                            results.add(com.github.easygit.model.TagResult(
-                                repositoryName = repoInfo.name,
-                                tagName = tagName,
-                                success = true,
-                                message = "Tag 创建成功"
-                            ))
-                        }
+                        historyService.addHistory(com.github.easygit.model.OperationHistory(
+                            operationType = com.github.easygit.model.OperationType.CREATE_TAG,
+                            repositoryName = repoTag.repositoryInfo.name,
+                            repositoryPath = repoTag.repositoryInfo.path,
+                            sourceBranch = "origin/${EasyGitSettings.getInstance().tagBaseBranchName}",
+                            tagName = result.tagName,
+                            success = result.success,
+                            message = result.message
+                        ))
+                    } else {
+                        results.add(com.github.easygit.model.TagResult(
+                            repositoryName = repoTag.repositoryInfo.name,
+                            tagName = repoTag.tagName,
+                            success = false,
+                            message = "无法获取仓库对象"
+                        ))
                     }
                 }
 

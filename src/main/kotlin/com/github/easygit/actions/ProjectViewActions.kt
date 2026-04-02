@@ -319,8 +319,6 @@ class ProjectViewOneClickMergeAction : ProjectViewBaseAction() {
     }
 }
 
-// ==================== Tag 操作 ====================
-
 /**
  * 项目视图 - 打 Tag（弹出对话框选择类型）
  */
@@ -367,8 +365,10 @@ class ProjectViewCreateTagAction : ProjectViewBaseAction() {
     ) {
         ProgressManager.getInstance().run(object : Task.Backgroundable(project, "创建 Tag", true) {
             override fun run(indicator: ProgressIndicator) {
-                val gitOps = GitOperations(project)
+                val tagManager = com.github.easygit.git.TagManager(project)
                 val historyService = HistoryService.getInstance()
+                val settings = com.github.easygit.settings.EasyGitSettings.getInstance()
+                val baseBranch = "origin/${settings.tagBaseBranchName}"
                 val results = mutableListOf<com.github.easygit.model.TagResult>()
 
                 repositoryTags.forEachIndexed { index, repoTag ->
@@ -377,48 +377,21 @@ class ProjectViewCreateTagAction : ProjectViewBaseAction() {
                     indicator.text = "正在处理: ${repoTag.repositoryInfo.name}"
 
                     val repo = repoTag.repositoryInfo.repository
-                    val tagName = repoTag.tagName
 
                     if (repo != null) {
-                        // 使用该仓库对应的 Tag 名称
-                        val createResult = gitOps.createTag(
+                        val result = tagManager.createTagWithName(
                             repo,
-                            tagName,
-                            description.ifBlank { null }
+                            repoTag.tagName,
+                            description,
+                            autoPush
                         )
-
-                        val result = if (!createResult.success()) {
-                            com.github.easygit.model.TagResult(
-                                repositoryName = repoTag.repositoryInfo.name,
-                                tagName = tagName,
-                                success = false,
-                                message = "创建 Tag 失败: ${createResult.errorOutputAsJoinedString}"
-                            )
-                        } else if (autoPush) {
-                            val pushResult = gitOps.pushTag(repo, tagName)
-                            com.github.easygit.model.TagResult(
-                                repositoryName = repoTag.repositoryInfo.name,
-                                tagName = tagName,
-                                success = pushResult.success(),
-                                message = if (pushResult.success()) "Tag 创建并推送成功" else "Tag 已创建，但推送失败: ${pushResult.errorOutputAsJoinedString}"
-                            )
-                        } else {
-                            com.github.easygit.model.TagResult(
-                                repositoryName = repoTag.repositoryInfo.name,
-                                tagName = tagName,
-                                success = true,
-                                message = "Tag 创建成功"
-                            )
-                        }
-
                         results.add(result)
 
-                        // 记录历史
                         historyService.addHistory(OperationHistory(
                             operationType = OperationType.CREATE_TAG,
                             repositoryName = repoTag.repositoryInfo.name,
                             repositoryPath = repoTag.repositoryInfo.path,
-                            sourceBranch = repo.currentBranch?.name ?: "",
+                            sourceBranch = baseBranch,
                             tagName = result.tagName,
                             success = result.success,
                             message = result.message
@@ -426,7 +399,7 @@ class ProjectViewCreateTagAction : ProjectViewBaseAction() {
                     } else {
                         results.add(com.github.easygit.model.TagResult(
                             repositoryName = repoTag.repositoryInfo.name,
-                            tagName = tagName,
+                            tagName = repoTag.tagName,
                             success = false,
                             message = "无法获取仓库对象"
                         ))

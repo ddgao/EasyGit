@@ -85,7 +85,7 @@ class ResultDialog(
         if (tagResults.isNotEmpty()) {
             val copyButton = JButton("复制所有 Tag 名称")
             copyButton.addActionListener {
-                val tagList = tagResults.map { "${it.repositoryName}: ${it.tagName}" }.joinToString("\n")
+                val tagList = tagResults.map { "${it.repositoryName} ${it.tagName}" }.joinToString("\n")
                 val selection = StringSelection(tagList)
                 Toolkit.getDefaultToolkit().systemClipboard.setContents(selection, null)
                 JOptionPane.showMessageDialog(panel, "已复制到剪贴板", "提示", JOptionPane.INFORMATION_MESSAGE)

@@ -110,3 +110,28 @@ tasks {
         token.set(System.getenv("PUBLISH_TOKEN"))
     }
 }
+
+// 自动递增 patch 版本号（+0.0.1）并打包
+tasks.register("bumpAndBuild") {
+    group = "build"
+    description = "自动递增 patch 版本号并打包插件"
+
+    doFirst {
+        val propsFile = file("gradle.properties")
+        val props = propsFile.readText()
+        val regex = Regex("""pluginVersion=(\d+)\.(\d+)\.(\d+)""")
+        val match = regex.find(props) ?: error("未找到 pluginVersion")
+        val (major, minor, patch) = match.destructured
+        val newVersion = "$major.$minor.${patch.toInt() + 1}"
+        propsFile.writeText(props.replace(match.value, "pluginVersion=$newVersion"))
+        println("版本号: ${match.value.substringAfter("=")} → $newVersion")
+    }
+
+    doLast {
+        // 用新进程构建，确保读取更新后的版本号
+        exec {
+            workingDir = projectDir
+            commandLine("./gradlew", "clean", "buildPlugin")
+        }
+    }
+}

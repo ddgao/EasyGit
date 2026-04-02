@@ -270,18 +270,20 @@ class TagDialog(
             repositories.forEachIndexed { index, repoInfo ->
                 val repo = repoInfo.repository ?: return@forEachIndexed
 
-                try {
-                    val latestTag = tagManager.getLatestVersionTag(repo) ?: "无"
-                    updateUI { tableModel.setLatestTag(index, latestTag) }
-                } catch (_: Exception) {
-                    updateUI { tableModel.setLatestTag(index, "无") }
-                }
-
+                // 先计算建议 Tag（内部会 fetchTags，同步远端已删除的 tag）
                 try {
                     val suggestedTag = tagManager.suggestNextTagName(repo, TagType.NORMAL)
                     updateUI { tableModel.setTagName(index, suggestedTag) }
                 } catch (_: Exception) {
                     updateUI { tableModel.setTagName(index, "v1.0.0") }
+                }
+
+                // fetch 后再获取最新 Tag，确保本地 tag 与远端一致
+                try {
+                    val latestTag = tagManager.getLatestVersionTag(repo) ?: "无"
+                    updateUI { tableModel.setLatestTag(index, latestTag) }
+                } catch (_: Exception) {
+                    updateUI { tableModel.setLatestTag(index, "无") }
                 }
             }
         }

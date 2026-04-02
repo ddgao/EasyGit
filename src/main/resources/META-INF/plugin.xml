@@ -122,6 +122,20 @@
                     icon="AllIcons.Actions.GC"/>
         </group>
 
+        <!-- ==================== Git 右键菜单集成 ==================== -->
+        <group id="EasyGit.GitMenu" text="EasyGit" popup="true" icon="AllIcons.Vcs.Merge">
+            <add-to-group group-id="Git.Menu" anchor="after" relative-to-action="Git.Rebase"/>
+
+            <reference ref="EasyGit.ProjectView.MergeToDev"/>
+            <reference ref="EasyGit.ProjectView.MergeToTest"/>
+            <reference ref="EasyGit.ProjectView.MergeToMain"/>
+            <separator/>
+            <reference ref="EasyGit.ProjectView.OneClickMerge"/>
+            <separator/>
+            <reference ref="EasyGit.ProjectView.CreateTag"/>
+            <reference ref="EasyGit.ProjectView.CleanBranch"/>
+        </group>
+
         <!-- ==================== 主菜单组 ==================== -->
         <group id="EasyGit.MainMenu" text="EasyGit" popup="true">
             <add-to-group group-id="VcsGroups" anchor="last"/>

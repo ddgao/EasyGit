@@ -274,6 +274,31 @@ class GitOperations(private val project: Project) {
         return git.runCommand(handler)
     }
 
+    // ==================== Stash 操作 ====================
+
+    /**
+     * 暂存当前工作区变更
+     * @param repository Git 仓库
+     * @param message stash 描述信息
+     * @return git 命令执行结果
+     */
+    fun stash(repository: GitRepository, message: String = "EasyGit auto stash"): GitCommandResult {
+        val handler = GitLineHandler(project, repository.root, GitCommand.STASH)
+        handler.addParameters("push", "-m", message)
+        return git.runCommand(handler)
+    }
+
+    /**
+     * 恢复最近一次暂存的变更
+     * @param repository Git 仓库
+     * @return git 命令执行结果
+     */
+    fun stashPop(repository: GitRepository): GitCommandResult {
+        val handler = GitLineHandler(project, repository.root, GitCommand.STASH)
+        handler.addParameters("pop")
+        return git.runCommand(handler)
+    }
+
     // ==================== 状态操作 ====================
 
     /**
@@ -290,19 +315,26 @@ class GitOperations(private val project: Project) {
      * 忽略：未跟踪文件、被 .gitignore 忽略的文件、.gitignore 中列出的已跟踪文件
      */
     fun hasUncommittedChanges(repository: GitRepository): Boolean {
+        return getUncommittedFiles(repository).isNotEmpty()
+    }
+
+    /**
+     * 获取未提交的已跟踪变更文件列表（排除未跟踪文件和 .gitignore 中的文件）
+     * @param repository Git 仓库
+     * @return 变更文件的相对路径列表
+     */
+    fun getUncommittedFiles(repository: GitRepository): List<String> {
         val result = status(repository)
-        if (!result.success()) return false
+        if (!result.success()) return emptyList()
 
         val changedFiles = result.output
             .filter { line -> line.isNotBlank() && !line.startsWith("??") && !line.startsWith("!!") }
             .map { line -> line.substring(3).trim() }
 
-        if (changedFiles.isEmpty()) return false
+        if (changedFiles.isEmpty()) return emptyList()
 
         val ignoredFiles = getIgnoredTrackedFiles(repository, changedFiles)
-        val realChanges = changedFiles.filter { it !in ignoredFiles }
-
-        return realChanges.isNotEmpty()
+        return changedFiles.filter { it !in ignoredFiles }
     }
 
     /**

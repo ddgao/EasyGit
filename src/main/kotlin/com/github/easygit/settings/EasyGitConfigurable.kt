@@ -226,7 +226,6 @@ class EasyGitConfigurable : Configurable {
         gbc.fill = GridBagConstraints.HORIZONTAL
         gbc.weightx = 1.0
 
-        // 合并选项
         val mergePanel = JPanel(GridBagLayout())
         mergePanel.border = BorderFactory.createTitledBorder("合并选项")
 
@@ -237,13 +236,11 @@ class EasyGitConfigurable : Configurable {
         gbc.gridy = 1
         mergePanel.add(autoPushCheckBox, gbc)
 
-        // 说明
         gbc.gridy = 2
         val noteLabel = JBLabel("<html><font color='gray'>• 合并前 Fetch: 确保获取远程最新代码<br>" +
                 "• 合并后 Push: 自动将合并结果推送到远程</font></html>")
         mergePanel.add(noteLabel, gbc)
 
-        // 主面板布局
         gbc.gridx = 0
         gbc.gridy = 0
         panel.add(mergePanel, gbc)
@@ -251,7 +248,7 @@ class EasyGitConfigurable : Configurable {
         gbc.gridy = 1
         gbc.weighty = 1.0
         gbc.fill = GridBagConstraints.BOTH
-        panel.add(JPanel(), gbc) // 占位
+        panel.add(JPanel(), gbc)
 
         return panel
     }
@@ -325,41 +322,33 @@ class EasyGitConfigurable : Configurable {
     }
 
     override fun apply() {
-        // 保存仓库路径
         val paths = (0 until repositoryListModel.size()).map { repositoryListModel.getElementAt(it) }
         settings.repositoryPaths = paths
 
-        // 保存分支配置
         settings.state.devBranchName = devBranchField.text
         settings.state.testBranchName = testBranchField.text
         settings.state.mainBranchName = mainBranchField.text
         settings.state.tagBaseBranch = tagBaseBranchField.text
 
-        // 保存自动化选项
         settings.state.autoFetchBeforeMerge = autoFetchCheckBox.isSelected
         settings.state.autoPushAfterMerge = autoPushCheckBox.isSelected
 
-        // 保存扫描配置
         settings.state.scanRootPath = scanRootPathField.text
         settings.state.scanMaxDepth = scanMaxDepthField.text.toIntOrNull() ?: 3
     }
 
     override fun reset() {
-        // 加载仓库路径
         repositoryListModel.clear()
         settings.repositoryPaths.forEach { repositoryListModel.addElement(it) }
 
-        // 加载分支配置
         devBranchField.text = settings.state.devBranchName
         testBranchField.text = settings.state.testBranchName
         mainBranchField.text = settings.state.mainBranchName
         tagBaseBranchField.text = settings.state.tagBaseBranch
 
-        // 加载自动化选项
         autoFetchCheckBox.isSelected = settings.state.autoFetchBeforeMerge
         autoPushCheckBox.isSelected = settings.state.autoPushAfterMerge
 
-        // 加载扫描配置
         scanRootPathField.text = settings.state.scanRootPath
         scanMaxDepthField.text = settings.state.scanMaxDepth.toString()
     }

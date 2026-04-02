@@ -17,13 +17,54 @@ class TagManager(private val project: Project) {
     private val settings = EasyGitSettings.getInstance()
 
     /**
-     * 获取最新的 Tag（支持多种格式）
+     * 获取最新的 Tag（按版本号排序，取最高版本）
      * 例如：v1.0.0, R_3.1.6, R_EMALL_STOCK_2406
      */
     fun getLatestVersionTag(repository: GitRepository): String? {
         val tags = gitOps.getAllTags(repository)
-        // 返回第一个（最新的）Tag，如果没有则返回 null
-        return tags.firstOrNull()
+        if (tags.isEmpty()) return null
+        // 按版本号排序，取最高版本；无法解析版本号的 Tag 排在最后
+        return tags.sortedWith(versionComparator.reversed()).first()
+    }
+
+    /**
+     * 版本号比较器：从 Tag 中提取版本号进行比较
+     * 支持 R_x.x.x、vx.x.x、x.x.x 格式，带 -Pxx/-Hxx 后缀
+     * 无法解析的 Tag 视为最小值
+     */
+    private val versionComparator = Comparator<String> { a, b ->
+        val va = extractVersionParts(a)
+        val vb = extractVersionParts(b)
+        if (va == null && vb == null) return@Comparator 0
+        if (va == null) return@Comparator -1
+        if (vb == null) return@Comparator 1
+        va.compareTo(vb)
+    }
+
+    private data class VersionParts(val major: Int, val minor: Int, val patch: Int, val suffix: String, val seq: Int) : Comparable<VersionParts> {
+        override fun compareTo(other: VersionParts): Int {
+            if (major != other.major) return major - other.major
+            if (minor != other.minor) return minor - other.minor
+            if (patch != other.patch) return patch - other.patch
+            // 无后缀 < 有后缀（R_3.1.7-P01 是基于 R_3.1.7 的补丁，版本更高）
+            if (suffix.isEmpty() && other.suffix.isEmpty()) return 0
+            if (suffix.isEmpty()) return -1
+            if (other.suffix.isEmpty()) return 1
+            if (suffix != other.suffix) return suffix.compareTo(other.suffix)
+            return seq - other.seq
+        }
+    }
+
+    private fun extractVersionParts(tag: String): VersionParts? {
+        val pattern = Regex("^(?:R_|v?)(\\d+)\\.(\\d+)\\.(\\d+)(?:-([PH])(\\d+))?$")
+        val match = pattern.matchEntire(tag) ?: return null
+        return VersionParts(
+            match.groupValues[1].toInt(),
+            match.groupValues[2].toInt(),
+            match.groupValues[3].toInt(),
+            match.groupValues[4],
+            match.groupValues[5].toIntOrNull() ?: 0
+        )
     }
 
     /**
@@ -75,14 +116,9 @@ class TagManager(private val project: Project) {
      */
     fun getLatestSemanticVersionTag(repository: GitRepository): String? {
         val tags = gitOps.getAllTags(repository)
-        // 匹配 v1.0.0 或 1.0.0 格式
-        val versionPattern = Regex("^v?(\\d+\\.\\d+\\.\\d+).*$")
-        // 匹配 R_x.x.x 格式
-        val rVersionPattern = Regex("^R_(\\d+\\.\\d+\\.\\d+).*$")
-
-        return tags.firstOrNull {
-            versionPattern.matches(it) || rVersionPattern.matches(it)
-        }
+        return tags.filter { extractVersionParts(it) != null }
+            .sortedWith(versionComparator.reversed())
+            .firstOrNull()
     }
 
     /**
@@ -312,27 +348,26 @@ class TagManager(private val project: Project) {
      * 例如：R_3.1.6 -> R_3.1.7, v1.2.3 -> v1.2.4
      */
     private fun suggestNextNormalTag(tags: List<String>): String {
-        // 匹配各种版本号格式
-        // R_x.x.x 或 R_x.x.x-Pxx 或 R_x.x.x-Hxx
         val rPattern = Regex("^(R_)(\\d+)\\.(\\d+)\\.(\\d+)(-[PH]\\d+)?$")
-        // vx.x.x 或 x.x.x 或 vx.x.x-Pxx 或 vx.x.x-Hxx
         val vPattern = Regex("^(v?)(\\d+)\\.(\\d+)\\.(\\d+)(-[PH]\\d+)?$")
 
-        for (tag in tags) {
-            // 尝试匹配 R_ 格式
+        // 按版本号排序取最高版本
+        val sorted = tags.filter { rPattern.matches(it) || vPattern.matches(it) }
+            .sortedWith(versionComparator.reversed())
+
+        for (tag in sorted) {
             var match = rPattern.matchEntire(tag)
             if (match != null) {
-                val prefix = match.groupValues[1]  // R_
+                val prefix = match.groupValues[1]
                 val major = match.groupValues[2].toInt()
                 val minor = match.groupValues[3].toInt()
                 val patch = match.groupValues[4].toInt()
                 return "${prefix}$major.$minor.${patch + 1}"
             }
 
-            // 尝试匹配 v 格式
             match = vPattern.matchEntire(tag)
             if (match != null) {
-                val prefix = match.groupValues[1].ifEmpty { "v" }  // v 或空
+                val prefix = match.groupValues[1].ifEmpty { "v" }
                 val major = match.groupValues[2].toInt()
                 val minor = match.groupValues[3].toInt()
                 val patch = match.groupValues[4].toInt()
@@ -352,8 +387,11 @@ class TagManager(private val project: Project) {
             return "v1.0.0$suffix${String.format("%02d", 1)}"
         }
 
-        val latestTag = tags.first()
-        val baseVersion = extractBaseVersionForNewSuffix(latestTag)
+        // 按版本号排序取最高版本作为基础版本
+        val highestTag = tags.filter { extractVersionParts(it) != null }
+            .sortedWith(versionComparator.reversed())
+            .firstOrNull() ?: tags.first()
+        val baseVersion = extractBaseVersionForNewSuffix(highestTag)
 
         val suffixPattern = Regex("^${Regex.escape(baseVersion)}${Regex.escape(suffix)}(\\d+)$")
 

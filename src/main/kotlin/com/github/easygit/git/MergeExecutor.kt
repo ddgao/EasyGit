@@ -37,7 +37,8 @@ class MergeExecutor(private val project: Project) {
         targetBranch: String,
         autoPush: Boolean = true,
         fetchFirst: Boolean = settings.state.autoFetchBeforeMerge,
-        switchBackAfterMerge: Boolean = true
+        switchBackAfterMerge: Boolean = true,
+        autoStash: Boolean = true
     ): BatchOperationResult {
         val repoName = repository.root.name
         val originalBranch = gitOps.getCurrentBranch(repository) ?: sourceBranch
@@ -46,14 +47,23 @@ class MergeExecutor(private val project: Project) {
         val localTargetBranch = if (isTargetRemote) targetBranch.removePrefix("origin/") else targetBranch
         val remoteTargetBranch = if (isTargetRemote) targetBranch else "origin/$targetBranch"
 
+        var needStashPop = false
+
         try {
-            if (gitOps.hasUncommittedChanges(repository)) {
-                return BatchOperationResult(
-                    repositoryName = repoName,
-                    repositoryPath = repository.root.path,
-                    success = false,
-                    message = "有未提交的更改，请先提交或暂存"
-                )
+            if (autoStash) {
+                val uncommittedFiles = gitOps.getUncommittedFiles(repository)
+                if (uncommittedFiles.isNotEmpty()) {
+                    val stashResult = gitOps.stash(repository, "EasyGit: 合并前自动暂存")
+                    if (!stashResult.success()) {
+                        return BatchOperationResult(
+                            repositoryName = repoName,
+                            repositoryPath = repository.root.path,
+                            success = false,
+                            message = "自动暂存失败: ${stashResult.errorOutputAsJoinedString}"
+                        )
+                    }
+                    needStashPop = true
+                }
             }
 
             if (fetchFirst) {
@@ -188,6 +198,13 @@ class MergeExecutor(private val project: Project) {
                 success = false,
                 message = "执行异常: ${e.message}"
             )
+        } finally {
+            if (needStashPop) {
+                try {
+                    gitOps.stashPop(repository)
+                } catch (_: Exception) {
+                }
+            }
         }
     }
 
@@ -199,10 +216,11 @@ class MergeExecutor(private val project: Project) {
         sourceBranch: String,
         target: MergeTarget,
         autoPush: Boolean = true,
-        switchBackAfterMerge: Boolean = true
+        switchBackAfterMerge: Boolean = true,
+        autoStash: Boolean = true
     ): BatchOperationResult {
         val remoteBranch = "origin/${target.branchName}"
-        return executeMerge(repository, sourceBranch, remoteBranch, autoPush, switchBackAfterMerge = switchBackAfterMerge)
+        return executeMerge(repository, sourceBranch, remoteBranch, autoPush, switchBackAfterMerge = switchBackAfterMerge, autoStash = autoStash)
     }
 
     /**
@@ -218,25 +236,55 @@ class MergeExecutor(private val project: Project) {
     ): List<BatchOperationResult> {
         val results = mutableListOf<BatchOperationResult>()
         val targets = listOf(MergeTarget.DEV, MergeTarget.TEST, MergeTarget.MAIN)
+        val originalBranch = gitOps.getCurrentBranch(repository) ?: sourceBranch
+        var needStashPop = false
 
-        for ((index, target) in targets.withIndex()) {
-            val isLastTarget = index == targets.size - 1
-            // 只在最后一个目标时切换回原分支
-            val result = mergeToTarget(
-                repository,
-                sourceBranch,
-                target,
-                autoPush,
-                switchBackAfterMerge = isLastTarget && switchBackAfterMerge
-            )
-            results.add(result)
-
-            // 如果某一步失败，停止后续操作，但仍然切换回原分支
-            if (!result.success) {
-                if (switchBackAfterMerge) {
-                    gitOps.checkout(repository, sourceBranch)
+        try {
+            // 一键合并开始前统一 stash
+            val uncommittedFiles = gitOps.getUncommittedFiles(repository)
+            if (uncommittedFiles.isNotEmpty()) {
+                val stashResult = gitOps.stash(repository, "EasyGit: 一键合并前自动暂存")
+                if (!stashResult.success()) {
+                    return listOf(BatchOperationResult(
+                        repositoryName = repository.root.name,
+                        repositoryPath = repository.root.path,
+                        success = false,
+                        message = "自动暂存失败: ${stashResult.errorOutputAsJoinedString}"
+                    ))
                 }
-                break
+                needStashPop = true
+            }
+
+            for (target in targets) {
+                // 中间步骤不切回、不单独 stash，由外层统一管理
+                val result = mergeToTarget(
+                    repository,
+                    sourceBranch,
+                    target,
+                    autoPush,
+                    switchBackAfterMerge = false,
+                    autoStash = false
+                )
+                results.add(result)
+
+                if (!result.success) {
+                    break
+                }
+            }
+        } finally {
+            // 统一切回原分支
+            if (switchBackAfterMerge) {
+                try {
+                    gitOps.checkout(repository, originalBranch)
+                } catch (_: Exception) {
+                }
+            }
+            // 切回原分支后再恢复暂存
+            if (needStashPop) {
+                try {
+                    gitOps.stashPop(repository)
+                } catch (_: Exception) {
+                }
             }
         }
 
